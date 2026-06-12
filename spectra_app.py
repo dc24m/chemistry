@@ -1046,7 +1046,7 @@ class PanelFileWidget(QWidget):
             row = QHBoxLayout()
             row.setSpacing(8)
             lbl = QLabel(label_text)
-            lbl.setFixedWidth(90)
+            lbl.setFixedWidth(78)
             lbl.setObjectName('fieldlbl')
             btn = ColorButton(default)
             row.addWidget(lbl)
@@ -1132,7 +1132,7 @@ class IVDataSetWidget(QWidget):
         self.pos_path = ''
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setContentsMargins(4, 8, 4, 8)
         lay.setSpacing(10)
 
         meta = QGroupBox('Set identity')
@@ -1171,10 +1171,10 @@ class IVDataSetWidget(QWidget):
         row.setSpacing(6)
         title_label = QLabel(title)
         title_label.setObjectName('fieldlbl')
-        title_label.setFixedWidth(104)
+        title_label.setFixedWidth(88)
         path_label = QLabel('No CSV selected')
         path_label.setObjectName('hint')
-        path_label.setMinimumWidth(120)
+        path_label.setMinimumWidth(40)
         path_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         btn_browse = QPushButton('Browse')
         btn_browse.setObjectName('secondary')
@@ -1228,9 +1228,9 @@ class IVDataSetWidget(QWidget):
         }
 
 
-def _labeled(label_text: str, widget: QWidget, lw: int = 96) -> QHBoxLayout:
+def _labeled(label_text: str, widget: QWidget, lw: int = 74) -> QHBoxLayout:
     r = QHBoxLayout()
-    r.setSpacing(10)
+    r.setSpacing(8)
     lbl = QLabel(label_text)
     lbl.setFixedWidth(lw)
     lbl.setObjectName('fieldlbl')
@@ -1269,15 +1269,15 @@ class ControlPanel(QScrollArea):
         self.setObjectName('sidebar')
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setFixedWidth(430)
+        self.setFixedWidth(326)
 
         root = QWidget()
         root.setObjectName('sidebar')
         self.setWidget(root)
 
         lay = QVBoxLayout(root)
-        lay.setContentsMargins(12, 12, 12, 16)
-        lay.setSpacing(8)
+        lay.setContentsMargins(8, 8, 8, 12)
+        lay.setSpacing(6)
 
         self._current_mode = MODES[0]['key']
 
@@ -1306,6 +1306,7 @@ class ControlPanel(QScrollArea):
         dgl.setSpacing(6)
         hint = QLabel('Add .csv / .tsv / .xy files per panel.')
         hint.setObjectName('hint')
+        hint.setWordWrap(True)
         dgl.addWidget(hint)
         self.panel_tabs = QTabWidget()
         self.panel_widgets: list[PanelFileWidget] = []
@@ -1320,7 +1321,7 @@ class ControlPanel(QScrollArea):
 
         self.g_iv = QGroupBox('IV Curve Data')
         iv_lay = QVBoxLayout(self.g_iv)
-        iv_lay.setContentsMargins(8, 16, 8, 8)
+        iv_lay.setContentsMargins(4, 14, 4, 8)
         iv_lay.setSpacing(8)
         self.spin_iv_sets = FlatSpinBox()
         self.spin_iv_sets.setRange(1, 10)
@@ -1348,16 +1349,19 @@ class ControlPanel(QScrollArea):
         agl = QVBoxLayout(self.g_axes)
         agl.setSpacing(9)
 
-        xrow = QHBoxLayout(); xrow.setSpacing(6)
-        xl = QLabel('X range'); xl.setFixedWidth(72); xl.setObjectName('fieldlbl')
+        xrow = QHBoxLayout(); xrow.setSpacing(5)
+        xl = QLabel('X range'); xl.setFixedWidth(52); xl.setObjectName('fieldlbl')
         self.spin_xmin = FlatDoubleSpinBox()
         self.spin_xmax = FlatDoubleSpinBox()
         for s in (self.spin_xmin, self.spin_xmax):
             s.setRange(-9999, 99999); s.setDecimals(1)
+            s.setMinimumWidth(56)
+            s.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.spin_xmin.setValue(400); self.spin_xmax.setValue(800)
         dash = QLabel('–'); dash.setStyleSheet('color:#8a93a0;')
-        xrow.addWidget(xl); xrow.addWidget(self.spin_xmin)
-        xrow.addWidget(dash); xrow.addWidget(self.spin_xmax)
+        dash.setFixedWidth(12); dash.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        xrow.addWidget(xl); xrow.addWidget(self.spin_xmin, 1)
+        xrow.addWidget(dash); xrow.addWidget(self.spin_xmax, 1)
         agl.addLayout(xrow)
 
         self.chk_auto_x = QCheckBox('Auto X (fit to data)')
@@ -1379,16 +1383,19 @@ class ControlPanel(QScrollArea):
         self.chk_pauto_x = QCheckBox('Auto X (this panel)')
         self.chk_pauto_x.toggled.connect(self._toggle_panel_xlim)
         agl.addWidget(self.chk_pauto_x)
-        pxrow = QHBoxLayout(); pxrow.setSpacing(6)
-        pxl = QLabel('X range'); pxl.setFixedWidth(72); pxl.setObjectName('fieldlbl')
+        pxrow = QHBoxLayout(); pxrow.setSpacing(5)
+        pxl = QLabel('X range'); pxl.setFixedWidth(52); pxl.setObjectName('fieldlbl')
         self.spin_pxmin = FlatDoubleSpinBox()
         self.spin_pxmax = FlatDoubleSpinBox()
         for s in (self.spin_pxmin, self.spin_pxmax):
             s.setRange(-9999, 99999); s.setDecimals(1)
+            s.setMinimumWidth(56)
+            s.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.spin_pxmin.setValue(400); self.spin_pxmax.setValue(800)
         pdash = QLabel('–'); pdash.setStyleSheet('color:#8a93a0;')
-        pxrow.addWidget(pxl); pxrow.addWidget(self.spin_pxmin)
-        pxrow.addWidget(pdash); pxrow.addWidget(self.spin_pxmax)
+        pdash.setFixedWidth(12); pdash.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pxrow.addWidget(pxl); pxrow.addWidget(self.spin_pxmin, 1)
+        pxrow.addWidget(pdash); pxrow.addWidget(self.spin_pxmax, 1)
         agl.addLayout(pxrow)
         # The per-panel editor widgets are disabled until "separate" is enabled.
         self._sepx_widgets = [self.combo_xpanel, self.chk_pauto_x,
@@ -1397,16 +1404,19 @@ class ControlPanel(QScrollArea):
 
         agl.addWidget(_sep())
 
-        yrow = QHBoxLayout(); yrow.setSpacing(6)
-        yl = QLabel('Y range'); yl.setFixedWidth(72); yl.setObjectName('fieldlbl')
+        yrow = QHBoxLayout(); yrow.setSpacing(5)
+        yl = QLabel('Y range'); yl.setFixedWidth(52); yl.setObjectName('fieldlbl')
         self.spin_ymin = FlatDoubleSpinBox()
         self.spin_ymax = FlatDoubleSpinBox()
         for s in (self.spin_ymin, self.spin_ymax):
             s.setRange(-9999999, 9999999); s.setDecimals(2)
+            s.setMinimumWidth(56)
+            s.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.spin_ymin.setValue(0); self.spin_ymax.setValue(1)
         dash2 = QLabel('–'); dash2.setStyleSheet('color:#8a93a0;')
-        yrow.addWidget(yl); yrow.addWidget(self.spin_ymin)
-        yrow.addWidget(dash2); yrow.addWidget(self.spin_ymax)
+        dash2.setFixedWidth(12); dash2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        yrow.addWidget(yl); yrow.addWidget(self.spin_ymin, 1)
+        yrow.addWidget(dash2); yrow.addWidget(self.spin_ymax, 1)
         agl.addLayout(yrow)
 
         self.chk_auto_y = QCheckBox('Auto Y (fit to data)')
@@ -1462,12 +1472,12 @@ class ControlPanel(QScrollArea):
 
         sgl.addWidget(_sep())
 
-        fw_row = QHBoxLayout(); fw_row.setSpacing(6)
-        fw_lbl = QLabel('Fig size (px)'); fw_lbl.setFixedWidth(96); fw_lbl.setObjectName('fieldlbl')
+        fw_row = QHBoxLayout(); fw_row.setSpacing(5)
+        fw_lbl = QLabel('Size (px)'); fw_lbl.setFixedWidth(52); fw_lbl.setObjectName('fieldlbl')
         self.spin_fw = FlatSpinBox()
         self.spin_fh = FlatSpinBox()
         for s in (self.spin_fw, self.spin_fh):
-            s.setRange(100, 3000); s.setSingleStep(50)
+            s.setRange(100, 3000); s.setSingleStep(50); s.setMaximumWidth(78)
         self.spin_fw.setValue(800); self.spin_fh.setValue(500)
         fw_x = QLabel('×'); fw_x.setStyleSheet('color:#8a93a0;')
         fw_row.addWidget(fw_lbl)
@@ -1477,6 +1487,7 @@ class ControlPanel(QScrollArea):
         sgl.addLayout(fw_row)
         fw_note = QLabel('Width × Height — fixed canvas size & export size')
         fw_note.setObjectName('hint')
+        fw_note.setWordWrap(True)
         sgl.addWidget(fw_note)
         lay.addWidget(g5)
 
@@ -2461,7 +2472,12 @@ class PlotCanvas(QWidget):
             self.mark_size_pending(False)
             return
 
-        self.fig.set_dpi(self.DISPLAY_DPI)
+        # Qt's resizeEvent recalculates figure size as:
+        #   w_inches = (logical_px * devicePixelRatio) / figure.dpi
+        # On Retina/HiDPI screens devicePixelRatio > 1, so we must scale the
+        # DPI by the same factor to keep w_inches = w_in after the event fires.
+        dpr = self.canvas.devicePixelRatioF() or 1.0
+        self.fig.set_dpi(self.DISPLAY_DPI * dpr)
         self.fig.set_size_inches(w_in, h_in)
         self.canvas.setFixedSize(width_px, height_px)
         self._applied_size_px = requested_px
