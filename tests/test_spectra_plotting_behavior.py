@@ -1,13 +1,24 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from matplotlib.figure import Figure
+from PyQt6.QtWidgets import QApplication
 
 import spectra_app
+
+
+_APP = None
+
+
+def qapp():
+    global _APP
+    _APP = QApplication.instance() or _APP or QApplication([])
+    return _APP
 
 
 def base_settings(**overrides):
@@ -248,7 +259,37 @@ class SpectraPlottingBehaviorTest(unittest.TestCase):
             self.assertEqual(voltage.tolist(), [-20.0, 0.0])
             self.assertEqual(current.tolist(), [1e-9, 3e-9])
 
-    def test_iv_plot_renders_black_sweeps_scaled_units_labels_and_padded_limits(self):
+    def test_load_file_reuses_cached_data_when_file_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.csv"
+            path.write_text("400,1\n500,2\n", encoding="utf-8")
+            spectra_app.clear_file_cache()
+
+            with patch("builtins.open", wraps=open) as mocked_open:
+                first_x, first_y = spectra_app.load_file(str(path))
+                second_x, second_y = spectra_app.load_file(str(path))
+
+            self.assertEqual(mocked_open.call_count, 1)
+            self.assertEqual(first_x.tolist(), second_x.tolist())
+            self.assertEqual(first_y.tolist(), second_y.tolist())
+
+    def test_load_file_cache_invalidates_when_file_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.csv"
+            path.write_text("400,1\n500,2\n", encoding="utf-8")
+            spectra_app.clear_file_cache()
+
+            first_x, first_y = spectra_app.load_file(str(path))
+            path.write_text("400,5\n500,7\n600,9\n", encoding="utf-8")
+            os.utime(path, None)
+            second_x, second_y = spectra_app.load_file(str(path))
+
+            self.assertEqual(first_x.tolist(), [400.0, 500.0])
+            self.assertEqual(first_y.tolist(), [1.0, 2.0])
+            self.assertEqual(second_x.tolist(), [400.0, 500.0, 600.0])
+            self.assertEqual(second_y.tolist(), [5.0, 7.0, 9.0])
+
+    def test_iv_plot_renders_set_colored_sweeps_one_legend_entry_and_padded_limits(self):
         with tempfile.TemporaryDirectory() as tmp:
             neg = Path(tmp) / "device_under25.csv"
             pos = Path(tmp) / "device_under5.csv"
@@ -260,8 +301,10 @@ class SpectraPlottingBehaviorTest(unittest.TestCase):
                 plot_type="iv",
                 n_panels=1,
                 iv_sets=[{
-                    "neg_paths": [str(neg)],
-                    "pos_paths": [str(pos)],
+                    "name": "Device A",
+                    "color": "#0072B2",
+                    "neg_path": str(neg),
+                    "pos_path": str(pos),
                 }],
                 linewidth=2.0,
                 fontsize=12,
@@ -271,20 +314,46 @@ class SpectraPlottingBehaviorTest(unittest.TestCase):
 
             ax = fig.axes[0]
             self.assertEqual(len(ax.lines), 2)
-            self.assertTrue(all(line.get_color() == "black" for line in ax.lines))
+            self.assertTrue(all(line.get_color() == "#0072B2" for line in ax.lines))
             self.assertTrue(all(line.get_linestyle() == "-" for line in ax.lines))
             self.assertTrue(all(line.get_marker() in ("None", "none", "") for line in ax.lines))
             self.assertEqual(ax.get_xlabel(), "Voltage (V)")
             self.assertEqual(ax.get_ylabel(), "Current (µA)")
             self.assertEqual(
                 [text.get_text() for text in ax.get_legend().get_texts()],
-                [
-                    "Set 1, -20 to 0: device under25",
-                    "Set 1, 0 to 20: device under5",
-                ],
+                ["Device A"],
             )
             self.assertEqual(ax.get_xlim(), (-22.0, 22.0))
             self.assertEqual(ax.get_ylim(), (0.75, 6.25))
+
+    def test_iv_plot_accepts_legacy_path_groups_with_set_name_and_color(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            neg = Path(tmp) / "legacy_under20.csv"
+            pos = Path(tmp) / "legacy_under0.csv"
+            neg.write_text("0,0,-20,1e-6\n0,0,0,2e-6\n", encoding="utf-8")
+            pos.write_text("0,0,0,3e-6\n0,0,20,4e-6\n", encoding="utf-8")
+            fig = Figure()
+
+            spectra_app.do_plot(fig, base_settings(
+                plot_type="iv",
+                n_panels=1,
+                iv_sets=[{
+                    "name": "Legacy Set",
+                    "color": "#D55E00",
+                    "neg_paths": [str(neg)],
+                    "pos_paths": [str(pos)],
+                }],
+                show_legend=True,
+                legend_loc="best",
+            ))
+
+            ax = fig.axes[0]
+            self.assertEqual(len(ax.lines), 2)
+            self.assertTrue(all(line.get_color() == "#D55E00" for line in ax.lines))
+            self.assertEqual(
+                [text.get_text() for text in ax.get_legend().get_texts()],
+                ["Legacy Set"],
+            )
 
     def test_iv_plot_rejects_missing_scan_groups(self):
         fig = Figure()
@@ -293,8 +362,35 @@ class SpectraPlottingBehaviorTest(unittest.TestCase):
             spectra_app.do_plot(fig, base_settings(
                 plot_type="iv",
                 n_panels=1,
-                iv_sets=[{"neg_paths": ["neg.csv"], "pos_paths": []}],
+                iv_sets=[{"name": "Device A", "neg_path": "neg.csv", "pos_path": ""}],
             ))
+
+    def test_iv_dataset_widget_settings_include_name_color_and_single_sweep_paths(self):
+        qapp()
+        widget = spectra_app.IVDataSetWidget(0)
+        widget.edit_name.setText("Device A")
+        widget.color.set_hex("#009E73")
+        widget.neg_path = r"C:\data\neg.csv"
+        widget.pos_path = r"C:\data\pos.csv"
+        widget._refresh_sweep_labels()
+
+        self.assertEqual(widget.settings(), {
+            "name": "Device A",
+            "color": "#009E73",
+            "neg_path": r"C:\data\neg.csv",
+            "pos_path": r"C:\data\pos.csv",
+        })
+
+    def test_iv_dataset_widget_clear_sweep_removes_path_from_settings(self):
+        qapp()
+        widget = spectra_app.IVDataSetWidget(1)
+        widget.neg_path = r"C:\data\neg.csv"
+        widget.pos_path = r"C:\data\pos.csv"
+        widget._clear_sweep("neg")
+
+        settings = widget.settings()
+        self.assertEqual(settings["neg_path"], "")
+        self.assertEqual(settings["pos_path"], r"C:\data\pos.csv")
 
 
 if __name__ == "__main__":

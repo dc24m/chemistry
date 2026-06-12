@@ -7,28 +7,37 @@ PL · Absorbance · XRD
 import sys
 import os
 import re
-import numpy as np
-import pandas as pd
 
-import matplotlib
-matplotlib.use('QtAgg')
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
-from matplotlib.figure import Figure
-from matplotlib.colors import to_rgb, to_hex
-from matplotlib.ticker import ScalarFormatter, FuncFormatter
+try:
+    import numpy as np
 
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
-    QAbstractSpinBox, QCheckBox, QLineEdit, QFileDialog, QScrollArea,
-    QGroupBox, QColorDialog, QMessageBox, QListWidget,
-    QAbstractItemView, QSplitter, QTabWidget, QGridLayout,
-    QSizePolicy, QDialog, QDialogButtonBox, QFormLayout,
-    QButtonGroup, QSplashScreen, QProgressBar, QGraphicsDropShadowEffect,
-    QToolButton, QFrame,
-)
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QColor, QCursor, QPixmap, QFontDatabase
+    import matplotlib
+    matplotlib.use('QtAgg')
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+    from matplotlib.figure import Figure
+    from matplotlib.colors import to_rgb, to_hex
+    from matplotlib.ticker import ScalarFormatter, FuncFormatter
+
+    from PyQt6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+        QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
+        QAbstractSpinBox, QCheckBox, QLineEdit, QFileDialog, QScrollArea,
+        QGroupBox, QColorDialog, QMessageBox, QListWidget,
+        QAbstractItemView, QSplitter, QTabWidget, QGridLayout,
+        QSizePolicy, QDialog, QDialogButtonBox, QFormLayout,
+        QButtonGroup, QSplashScreen, QProgressBar, QGraphicsDropShadowEffect,
+        QToolButton, QFrame,
+    )
+    from PyQt6.QtCore import Qt, pyqtSignal
+    from PyQt6.QtGui import QFont, QColor, QCursor, QPixmap, QFontDatabase
+except ModuleNotFoundError as exc:
+    missing = exc.name or 'a required package'
+    raise SystemExit(
+        f"SPECTRAplot could not start because '{missing}' is not installed for:\n"
+        f"  {sys.executable}\n\n"
+        "Install the app dependencies with:\n"
+        "  python -m pip install -r requirements_spectra.txt"
+    ) from exc
 
 matplotlib.rcParams.update({
     'font.family': 'sans-serif',
@@ -64,7 +73,7 @@ MODES = [
     {'key': 'pl',         'label': 'Photoluminescence', 'accent': '#F472B6'},
     {'key': 'absorbance', 'label': 'Absorbance',        'accent': '#38BDF8'},
     {'key': 'xrd',        'label': 'XRD',               'accent': '#A78BFA'},
-    {'key': 'iv',         'label': 'IV curve',          'accent': '#737373'},
+    {'key': 'iv',         'label': 'IV curve',          'accent': '#FBBF24'},
 ]
 for _m in MODES:
     _m['title'] = darken(_m['accent'], 0.45)
@@ -252,9 +261,9 @@ QPushButton#headerTab:hover {{
     border-color: #BDBDBD;
 }}
 QPushButton#headerTab:checked {{
-    color: {INK};
-    background: {BG};
-    border: 2px solid {ACCENT};
+    color: #171717;
+    background: {ACCENT};
+    border: 1px solid {ACCENT};
     font-weight: 700;
 }}
 
@@ -352,9 +361,9 @@ QTabBar::tab {{
     letter-spacing: 0.2px;
 }}
 QTabBar::tab:selected {{
-    background: {BG};
-    color: {PRIMARY};
-    border-top: 2px solid {ACCENT};
+    background: {ACCENT};
+    color: #171717;
+    border-color: {ACCENT};
 }}
 
 /* ── Canvas area ────────────────────────────────────────────────────────── */
@@ -519,6 +528,32 @@ QPushButton#qt_msgbox_buttonbox {{ background: {BG}; }}
 # Line-style options shared by the trace editor and the plotting code.
 LINESTYLE_LABELS = ['solid', 'dashed', 'dotted', 'dash-dot']
 LINESTYLE_MAP = {'solid': '-', 'dashed': '--', 'dotted': ':', 'dash-dot': '-.'}
+IV_SET_COLORS = [
+    '#0072B2', '#D55E00', '#009E73', '#CC79A7', '#56B4E9',
+    '#E69F00', '#332288', '#88CCEE', '#117733', '#882255',
+]
+_FILE_CACHE = {}
+
+
+def clear_file_cache():
+    _FILE_CACHE.clear()
+
+
+def _load_cached(kind: str, path: str, parser):
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None, None
+
+    cache_key = (kind, os.path.abspath(path))
+    signature = (stat.st_mtime_ns, stat.st_size)
+    cached = _FILE_CACHE.get(cache_key)
+    if cached and cached[0] == signature:
+        return cached[1]
+
+    result = parser(path)
+    _FILE_CACHE[cache_key] = (signature, result)
+    return result
 
 
 def clean_label(filename: str) -> str:
@@ -547,35 +582,37 @@ def load_file(path: str):
     Handles any number of header rows, any delimiter, and European decimals.
     Returns (x, y) arrays or (None, None) on failure.
     """
+    return _load_cached('spectra', path, _parse_spectra_file)
+
+
+def _parse_spectra_file(path: str):
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as f:
-            lines = f.readlines()
+            xs, ys = [], []
+            for line in f:
+                line = line.strip()
+                if not line or line[0] in '#%!':
+                    continue
+                if ';' in line or '\t' in line:
+                    parts = re.split(r'[;\t]+', line)
+                    parts = [p.strip() for p in parts if p.strip()]
+                    fix = lambda s: s.replace(',', '.')
+                else:
+                    parts = re.split(r'[,\s]+', line)
+                    parts = [p for p in parts if p]
+                    fix = lambda s: s
+                if len(parts) < 2:
+                    continue
+                try:
+                    x = float(fix(parts[0]))
+                    y = float(fix(parts[1]))
+                except ValueError:
+                    continue
+                if np.isfinite(x) and np.isfinite(y):
+                    xs.append(x)
+                    ys.append(y)
     except Exception:
         return None, None
-
-    xs, ys = [], []
-    for line in lines:
-        line = line.strip()
-        if not line or line[0] in '#%!':
-            continue
-        if ';' in line or '\t' in line:
-            parts = re.split(r'[;\t]+', line)
-            parts = [p.strip() for p in parts if p.strip()]
-            fix = lambda s: s.replace(',', '.')
-        else:
-            parts = re.split(r'[,\s]+', line)
-            parts = [p for p in parts if p]
-            fix = lambda s: s
-        if len(parts) < 2:
-            continue
-        try:
-            x = float(fix(parts[0]))
-            y = float(fix(parts[1]))
-        except ValueError:
-            continue
-        if np.isfinite(x) and np.isfinite(y):
-            xs.append(x)
-            ys.append(y)
 
     return (np.array(xs), np.array(ys)) if len(xs) >= 2 else (None, None)
 
@@ -597,32 +634,34 @@ def sort_iv_files_by_under_value(files: list[str]) -> list[str]:
 
 def load_iv_csv(path: str):
     """Load Keithley IV CSV data: column 3 = voltage, column 4 = current in A."""
+    return _load_cached('iv', path, _parse_iv_csv)
+
+
+def _parse_iv_csv(path: str):
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as f:
-            lines = f.readlines()
+            voltages, currents = [], []
+            for line in f:
+                line = line.strip()
+                if not line or line[0] in '#%!':
+                    continue
+                if any(ch in line for ch in ',;\t'):
+                    parts = re.split(r'[,;\t]+', line)
+                else:
+                    parts = re.split(r'\s+', line)
+                parts = [p.strip() for p in parts if p.strip()]
+                if len(parts) < 4:
+                    continue
+                try:
+                    voltage = float(parts[2])
+                    current = float(parts[3])
+                except ValueError:
+                    continue
+                if np.isfinite(voltage) and np.isfinite(current):
+                    voltages.append(voltage)
+                    currents.append(current)
     except Exception:
         return None, None
-
-    voltages, currents = [], []
-    for line in lines:
-        line = line.strip()
-        if not line or line[0] in '#%!':
-            continue
-        if any(ch in line for ch in ',;\t'):
-            parts = re.split(r'[,;\t]+', line)
-        else:
-            parts = re.split(r'\s+', line)
-        parts = [p.strip() for p in parts if p.strip()]
-        if len(parts) < 4:
-            continue
-        try:
-            voltage = float(parts[2])
-            current = float(parts[3])
-        except ValueError:
-            continue
-        if np.isfinite(voltage) and np.isfinite(current):
-            voltages.append(voltage)
-            currents.append(current)
 
     if not voltages:
         return None, None
@@ -652,9 +691,24 @@ def validate_iv_sets(iv_sets: list[dict]) -> str | None:
     if not iv_sets:
         return 'Add at least one IV data set before plotting.'
     for idx, data_set in enumerate(iv_sets, start=1):
-        if not data_set.get('neg_paths') or not data_set.get('pos_paths'):
+        neg_paths, pos_paths = _iv_sweep_paths(data_set)
+        if len(neg_paths) != 1 or len(pos_paths) != 1:
             return f'Set {idx} requires both IV scan groups (-20 to 0 V and 0 to 20 V).'
     return None
+
+
+def _iv_sweep_paths(data_set: dict) -> tuple[list[str], list[str]]:
+    def paths(single_key: str, legacy_key: str) -> list[str]:
+        single = str(data_set.get(single_key, '') or '').strip()
+        if single:
+            return [single]
+        return [
+            str(path).strip()
+            for path in data_set.get(legacy_key, [])
+            if str(path).strip()
+        ]
+
+    return paths('neg_path', 'neg_paths'), paths('pos_path', 'pos_paths')
 
 
 def make_gradient(c1_hex: str, c2_hex: str, n: int) -> list:
@@ -1073,86 +1127,103 @@ class IVDataSetWidget(QWidget):
     def __init__(self, index: int, parent=None):
         super().__init__(parent)
         self.index = index
-        self.neg_paths: list[str] = []
-        self.pos_paths: list[str] = []
+        self.neg_path = ''
+        self.pos_path = ''
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 10, 10, 10)
         lay.setSpacing(10)
 
-        neg_group, self.neg_list = self._scan_group(
-            '-20 to 0 V scan',
-            lambda: self._add_paths('neg_paths', self.neg_list, '-20 to 0 V scan'),
-            lambda: self._remove_selected('neg_paths', self.neg_list),
+        meta = QGroupBox('Set identity')
+        meta_lay = QFormLayout(meta)
+        meta_lay.setContentsMargins(8, 14, 8, 8)
+        meta_lay.setVerticalSpacing(8)
+        self.edit_name = QLineEdit(f'Set {index + 1}')
+        self.edit_name.setPlaceholderText(f'Set {index + 1}')
+        self.color = ColorButton(IV_SET_COLORS[index % len(IV_SET_COLORS)])
+        meta_lay.addRow('Name', self.edit_name)
+        meta_lay.addRow('Color', self.color)
+        lay.addWidget(meta)
+
+        hint = QLabel('Required: one CSV for each sweep direction.')
+        hint.setObjectName('hint')
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        self.neg_label, neg_row = self._sweep_row(
+            '-20 to 0 V sweep',
+            lambda: self._pick_sweep('neg'),
+            lambda: self._clear_sweep('neg'),
         )
-        pos_group, self.pos_list = self._scan_group(
-            '0 to 20 V scan',
-            lambda: self._add_paths('pos_paths', self.pos_list, '0 to 20 V scan'),
-            lambda: self._remove_selected('pos_paths', self.pos_list),
+        self.pos_label, pos_row = self._sweep_row(
+            '0 to 20 V sweep',
+            lambda: self._pick_sweep('pos'),
+            lambda: self._clear_sweep('pos'),
         )
-        lay.addWidget(neg_group)
-        lay.addWidget(pos_group)
+        lay.addLayout(neg_row)
+        lay.addLayout(pos_row)
+        lay.addStretch(1)
+        self._refresh_sweep_labels()
 
-    def _scan_group(self, title: str, add_handler, remove_handler):
-        group = QGroupBox(title)
-        gl = QVBoxLayout(group)
-        gl.setContentsMargins(8, 12, 8, 8)
-        gl.setSpacing(6)
-
-        lst = QListWidget()
-        lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        lst.setMinimumHeight(72)
-        lst.setMaximumHeight(110)
-        gl.addWidget(lst)
-
+    def _sweep_row(self, title: str, browse_handler, clear_handler):
         row = QHBoxLayout()
         row.setSpacing(6)
-        btn_add = QPushButton('+ Add CSVs')
-        btn_add.setObjectName('secondary')
-        btn_rem = QPushButton('Remove')
-        btn_rem.setObjectName('danger')
-        btn_add.clicked.connect(add_handler)
-        btn_rem.clicked.connect(remove_handler)
-        row.addWidget(btn_add, 2)
-        row.addWidget(btn_rem, 1)
-        gl.addLayout(row)
-        return group, lst
+        title_label = QLabel(title)
+        title_label.setObjectName('fieldlbl')
+        title_label.setFixedWidth(104)
+        path_label = QLabel('No CSV selected')
+        path_label.setObjectName('hint')
+        path_label.setMinimumWidth(120)
+        path_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        btn_browse = QPushButton('Browse')
+        btn_browse.setObjectName('secondary')
+        btn_clear = QPushButton('X')
+        btn_clear.setObjectName('danger')
+        btn_clear.setFixedWidth(34)
+        btn_browse.clicked.connect(browse_handler)
+        btn_clear.clicked.connect(clear_handler)
+        row.addWidget(title_label)
+        row.addWidget(path_label, 1)
+        row.addWidget(btn_browse)
+        row.addWidget(btn_clear)
+        return path_label, row
 
-    def _refresh_list(self, attr: str, lst: QListWidget):
-        lst.clear()
-        for path in getattr(self, attr):
-            lst.addItem(os.path.basename(path))
+    def _refresh_sweep_labels(self):
+        self.neg_label.setText(os.path.basename(self.neg_path) if self.neg_path else 'No CSV selected')
+        self.pos_label.setText(os.path.basename(self.pos_path) if self.pos_path else 'No CSV selected')
 
-    def _add_paths(self, attr: str, lst: QListWidget, scan_label: str):
-        paths, _ = QFileDialog.getOpenFileNames(
+    def _pick_sweep(self, sweep: str):
+        label = '-20 to 0 V sweep' if sweep == 'neg' else '0 to 20 V sweep'
+        path, _ = QFileDialog.getOpenFileName(
             self,
-            f'Set {self.index + 1}: select {scan_label} CSV files',
+            f'{self.display_name()}: select {label} CSV',
             '',
             'Keithley CSV files (*.csv);;All files (*.*)',
         )
-        if not paths:
+        if not path:
             return
-        current = list(getattr(self, attr))
-        existing = set(current)
-        for path in paths:
-            if path not in existing:
-                current.append(path)
-                existing.add(path)
-        setattr(self, attr, sort_iv_files_by_under_value(current))
-        self._refresh_list(attr, lst)
+        if sweep == 'neg':
+            self.neg_path = path
+        else:
+            self.pos_path = path
+        self._refresh_sweep_labels()
 
-    def _remove_selected(self, attr: str, lst: QListWidget):
-        rows = sorted([lst.row(item) for item in lst.selectedItems()], reverse=True)
-        paths = list(getattr(self, attr))
-        for row in rows:
-            lst.takeItem(row)
-            paths.pop(row)
-        setattr(self, attr, paths)
+    def _clear_sweep(self, sweep: str):
+        if sweep == 'neg':
+            self.neg_path = ''
+        else:
+            self.pos_path = ''
+        self._refresh_sweep_labels()
+
+    def display_name(self) -> str:
+        return self.edit_name.text().strip() or f'Set {self.index + 1}'
 
     def settings(self) -> dict:
         return {
-            'neg_paths': list(self.neg_paths),
-            'pos_paths': list(self.pos_paths),
+            'name': self.display_name(),
+            'color': self.color.hex(),
+            'neg_path': self.neg_path,
+            'pos_path': self.pos_path,
         }
 
 
@@ -2192,6 +2263,7 @@ class FigureEditor:
 # ── Plot canvas ───────────────────────────────────────────────────────────────
 
 class PlotCanvas(QWidget):
+    size_update_requested = pyqtSignal()
     DISPLAY_DPI = 100  # on-screen pixels per inch of figure
 
     def __init__(self, parent=None):
@@ -2235,16 +2307,21 @@ class PlotCanvas(QWidget):
         self.btn_grid.setText('Grid')
         self.btn_grid.setToolTip('Toggle grid on all axes')
         self.btn_grid.setCheckable(True)
+        self.btn_update_size = QToolButton()
+        self.btn_update_size.setText('Update')
+        self.btn_update_size.setToolTip('Apply pending figure size')
         self.btn_save_fig = QToolButton()
         self.btn_save_fig.setText('Save')
         self.btn_save_fig.setToolTip('Save figure')
-        for _b in (self.btn_fit, self.btn_autoscale, self.btn_grid, self.btn_save_fig):
+        for _b in (self.btn_fit, self.btn_autoscale, self.btn_grid,
+                   self.btn_update_size, self.btn_save_fig):
             _b.setObjectName('figToolbarBtn')
             self.toolbar.addWidget(_b)
 
         self.btn_fit.clicked.connect(self._toolbar_fit)
         self.btn_autoscale.clicked.connect(self._toolbar_fit)
         self.btn_grid.toggled.connect(self._toolbar_grid)
+        self.btn_update_size.clicked.connect(lambda _checked=False: self.size_update_requested.emit())
         self.btn_save_fig.clicked.connect(self.toolbar.save_figure)
 
         card_lay.addWidget(self.toolbar)
@@ -2287,12 +2364,25 @@ class PlotCanvas(QWidget):
 
     def set_fig_size(self, w_in: float, h_in: float):
         """Lock both the matplotlib figure and the on-screen widget to a fixed size."""
+        width_px = int(round(w_in * self.DISPLAY_DPI))
+        height_px = int(round(h_in * self.DISPLAY_DPI))
+        requested_px = (width_px, height_px)
+        if requested_px == self.applied_size_pixels():
+            self.mark_size_pending(False)
+            return
+
         self.fig.set_dpi(self.DISPLAY_DPI)
         self.fig.set_size_inches(w_in, h_in)
-        self.canvas.setFixedSize(
-            int(round(w_in * self.DISPLAY_DPI)),
-            int(round(h_in * self.DISPLAY_DPI)),
-        )
+        self.canvas.setFixedSize(width_px, height_px)
+        self._applied_size_px = requested_px
+        self.mark_size_pending(False)
+
+    def applied_size_pixels(self) -> tuple[int, int]:
+        return getattr(self, '_applied_size_px', (self.canvas.width(), self.canvas.height()))
+
+    def mark_size_pending(self, pending: bool):
+        self.btn_update_size.setEnabled(pending)
+        self.btn_update_size.setText('Update *' if pending else 'Update')
 
     def get_figure(self) -> Figure:
         return self.fig
@@ -2666,18 +2756,18 @@ def _load_iv_entries(iv_sets: list[dict]):
     entries = []
     failed = 0
     for set_idx, data_set in enumerate(iv_sets, start=1):
-        groups = (
-            ('neg_paths', '-20 to 0'),
-            ('pos_paths', '0 to 20'),
-        )
-        for key, scan_label in groups:
-            for path in sort_iv_files_by_under_value(list(data_set.get(key, []))):
-                voltage, current = load_iv_csv(path)
-                if voltage is None:
-                    failed += 1
-                    continue
-                label = f'Set {set_idx}, {scan_label}: {clean_iv_label(path)}'
-                entries.append((voltage, current, label))
+        neg_paths, pos_paths = _iv_sweep_paths(data_set)
+        name = str(data_set.get('name') or '').strip() or f'Set {set_idx}'
+        color = str(data_set.get('color') or '').strip() or IV_SET_COLORS[(set_idx - 1) % len(IV_SET_COLORS)]
+        sweeps = []
+        for path in (neg_paths[0], pos_paths[0]):
+            voltage, current = load_iv_csv(path)
+            if voltage is None:
+                failed += 1
+                continue
+            sweeps.append((voltage, current))
+        if sweeps:
+            entries.append({'name': name, 'color': color, 'sweeps': sweeps})
     return entries, failed
 
 
@@ -2690,23 +2780,28 @@ def _plot_iv(fig: Figure, s: dict) -> int:
     if not entries:
         raise ValueError('No valid IV data could be loaded from the selected CSV files.')
 
-    all_voltage = np.concatenate([entry[0] for entry in entries])
-    all_current = np.concatenate([entry[1] for entry in entries])
+    all_voltage = np.concatenate([voltage for entry in entries for voltage, _current in entry['sweeps']])
+    all_current = np.concatenate([current for entry in entries for _voltage, current in entry['sweeps']])
     scale, unit = choose_iv_current_unit(float(np.max(np.abs(all_current))))
 
     ax = fig.subplots(1, 1)
     handles, labels = [], []
-    for voltage, current, label in entries:
-        line, = ax.plot(
-            voltage,
-            current * scale,
-            color='black',
-            linestyle='-',
-            marker='None',
-            linewidth=s.get('linewidth', 2.0),
-        )
-        handles.append(line)
-        labels.append(label)
+    for entry in entries:
+        legend_line = None
+        for voltage, current in entry['sweeps']:
+            line, = ax.plot(
+                voltage,
+                current * scale,
+                color=entry['color'],
+                linestyle='-',
+                marker='None',
+                linewidth=s.get('linewidth', 2.0),
+            )
+            if legend_line is None:
+                legend_line = line
+        if legend_line is not None:
+            handles.append(legend_line)
+            labels.append(entry['name'])
 
     _style_ax(ax, True, 'Voltage (V)', f'Current ({unit})', s)
     _add_legend(ax, handles, labels, s)
@@ -3006,8 +3101,9 @@ class MainWindow(QMainWindow):
         self.controls.plot_requested.connect(self._do_plot)
         self.header.mode_changed.connect(self._on_mode_change)
         self.header.theme_toggled.connect(self._on_theme_toggle)
-        self.controls.spin_fw.valueChanged.connect(self._update_canvas_size)
-        self.controls.spin_fh.valueChanged.connect(self._update_canvas_size)
+        self.controls.spin_fw.valueChanged.connect(self._mark_canvas_size_pending)
+        self.controls.spin_fh.valueChanged.connect(self._mark_canvas_size_pending)
+        self.canvas.size_update_requested.connect(self._update_canvas_size)
         self.controls.chk_snap.toggled.connect(self._update_snap)
         self.controls.spin_snap_step.valueChanged.connect(self._update_snap)
         self.canvas.canvas.mpl_connect('motion_notify_event', self._on_coord_motion)
@@ -3056,10 +3152,17 @@ class MainWindow(QMainWindow):
             text = f'x: {x:.3f}   y: {y:.4g}'
         self.statusbar.update_coords(text)
 
+    def _mark_canvas_size_pending(self, *_):
+        requested = (self.controls.spin_fw.value(), self.controls.spin_fh.value())
+        self.canvas.mark_size_pending(requested != self.canvas.applied_size_pixels())
+
     def _update_canvas_size(self):
         self.canvas.set_fig_size(
             self.controls.spin_fw.value() / 100, self.controls.spin_fh.value() / 100)
         self.canvas.canvas.draw_idle()
+        self.statusbar.show_message(
+            f'Figure size updated to {self.controls.spin_fw.value()} x {self.controls.spin_fh.value()} px.'
+        )
 
     def _update_snap(self, *_):
         self.editor.set_snap(
@@ -3085,6 +3188,8 @@ class MainWindow(QMainWindow):
         self.statusbar.show_message('Plotting…')
         self.canvas.set_fig_size(s['fig_width'] / 100, s['fig_height'] / 100)
         self.editor.set_snap(s['snap_enabled'], s['snap_step'])
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+        QApplication.processEvents()
         try:
             msg = do_plot(self.canvas.get_figure(), s)
             self.editor.refresh()
@@ -3092,6 +3197,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, 'Plot Error', str(e))
             self.statusbar.show_message(f'Error: {e}')
+        finally:
+            QApplication.restoreOverrideCursor()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
