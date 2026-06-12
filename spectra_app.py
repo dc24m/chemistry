@@ -26,10 +26,11 @@ try:
         QAbstractItemView, QSplitter, QTabWidget, QGridLayout,
         QSizePolicy, QDialog, QDialogButtonBox, QFormLayout,
         QButtonGroup, QSplashScreen, QProgressBar, QGraphicsDropShadowEffect,
-        QToolButton, QFrame,
+        QToolButton, QFrame, QSlider,
     )
-    from PyQt6.QtCore import Qt, pyqtSignal
-    from PyQt6.QtGui import QFont, QColor, QCursor, QPixmap, QFontDatabase
+    from PyQt6.QtCore import Qt, pyqtSignal, QEvent
+    from PyQt6.QtGui import (QFont, QColor, QCursor, QPixmap, QFontDatabase,
+                              QUndoStack, QUndoCommand, QKeySequence, QShortcut)
 except ModuleNotFoundError as exc:
     missing = exc.name or 'a required package'
     raise SystemExit(
@@ -367,7 +368,7 @@ QTabBar::tab:selected {{
 }}
 
 /* ── Canvas area ────────────────────────────────────────────────────────── */
-#rightPane, #canvasArea, #canvasScroll, #canvasHolder {{ background: {BG}; }}
+#rightPane, #canvasArea, #canvasScroll, #canvasHolder {{ background: {'#1E1E1E' if dark else '#EBEBEB'}; }}
 #canvasCard {{
     background: {'#2A2A2A' if dark else '#D8D8D8'};
     border: 1px solid {BORDER};
@@ -1529,8 +1530,8 @@ class ControlPanel(QScrollArea):
         tgl.addLayout(_labeled('Tick width', self.spin_tick_w))
         tgl.addStretch(1)
 
-        # ── Number format (Y-axis notation)
-        g_num = QGroupBox('Y Axis Numbers')
+        # ── Number format (axis notation)
+        g_num = QGroupBox('Axis Numbers')
         ngl = QVBoxLayout(g_num)
         ngl.setSpacing(4)
         ngl.setContentsMargins(8, 6, 8, 6)
@@ -1546,6 +1547,26 @@ class ControlPanel(QScrollArea):
         self.spin_sci_exp.setRange(-12, 12); self.spin_sci_exp.setValue(3)
         self.spin_sci_exp.setEnabled(False)
         ngl.addLayout(_labeled('Exponent', self.spin_sci_exp, 70))
+        # slider + spinbox: distance from axis numbers to box outline
+        self.slider_numpad = QSlider(Qt.Orientation.Horizontal)
+        self.slider_numpad.setRange(0, 30)
+        self.slider_numpad.setValue(6)
+        self.spin_numpad = FlatSpinBox()
+        self.spin_numpad.setRange(0, 30)
+        self.spin_numpad.setValue(6)
+        self.spin_numpad.setFixedWidth(44)
+        self.slider_numpad.valueChanged.connect(self.spin_numpad.setValue)
+        self.spin_numpad.valueChanged.connect(self.slider_numpad.setValue)
+        self.slider_numpad.valueChanged.connect(lambda _: self.plot_requested.emit())
+        _dist_row = QHBoxLayout()
+        _dist_row.setSpacing(6)
+        _lbl_dist = QLabel('Distance')
+        _lbl_dist.setFixedWidth(70)
+        _lbl_dist.setObjectName('fieldlbl')
+        _dist_row.addWidget(_lbl_dist)
+        _dist_row.addWidget(self.slider_numpad, 1)
+        _dist_row.addWidget(self.spin_numpad)
+        ngl.addLayout(_dist_row)
         ngl.addStretch(1)
 
         # ── Legend (full customization; transparent background by default)
@@ -1610,20 +1631,6 @@ class ControlPanel(QScrollArea):
         _box_row.addWidget(self.color_box); _box_row.addWidget(self.spin_box_lw)
         _box_w = QWidget(); _box_w.setLayout(_box_row)
         bgl.addRow('Color / lw', _box_w)
-        self.spin_xpad = FlatSpinBox()
-        self.spin_xpad.setRange(0, 30); self.spin_xpad.setValue(6)
-        self.spin_xpad.setFixedWidth(52)
-        self.spin_ypad = FlatSpinBox()
-        self.spin_ypad.setRange(0, 30); self.spin_ypad.setValue(6)
-        self.spin_ypad.setFixedWidth(52)
-        _pad_row = QHBoxLayout(); _pad_row.setSpacing(4)
-        _xl = QLabel('X'); _xl.setObjectName('fieldlbl')
-        _yl = QLabel('Y'); _yl.setObjectName('fieldlbl')
-        _pad_row.addWidget(_xl); _pad_row.addWidget(self.spin_xpad)
-        _pad_row.addSpacing(4)
-        _pad_row.addWidget(_yl); _pad_row.addWidget(self.spin_ypad)
-        _pad_w = QWidget(); _pad_w.setLayout(_pad_row)
-        bgl.addRow('Pad', _pad_w)
         bgl.addRow(_sep())
         self.chk_manual_box = QCheckBox('Manual layout')
         self.chk_manual_box.setChecked(False)
@@ -1963,8 +1970,8 @@ class ControlPanel(QScrollArea):
             'tick_length': self.spin_tick_len.value(),
             'tick_width': self.spin_tick_w.value(),
             'minor_ticks': self.chk_minor_ticks.isChecked(),
-            'x_tick_pad': self.spin_xpad.value(),
-            'y_tick_pad': self.spin_ypad.value(),
+            'x_tick_pad': self.spin_numpad.value(),
+            'y_tick_pad': self.spin_numpad.value(),
             # Number format
             'y_notation': self.combo_ynot.currentText(),
             'force_sci': self.chk_force_sci.isChecked(),
@@ -2121,6 +2128,25 @@ class LegendEditDialog(QDialog):
 
 # ── Interactive figure editor ──────────────────────────────────────────────────
 
+class _MoveCommand(QUndoCommand):
+    """Undo/redo a single text-artist drag in the figure editor."""
+
+    def __init__(self, artist, before_pos, after_pos, canvas):
+        super().__init__('Move')
+        self._artist = artist
+        self._before = before_pos
+        self._after = after_pos
+        self._canvas = canvas
+
+    def undo(self):
+        self._artist.set_position(self._before)
+        self._canvas.draw_idle()
+
+    def redo(self):
+        self._artist.set_position(self._after)
+        self._canvas.draw_idle()
+
+
 class FigureEditor:
     """
     Adds direct manipulation to a matplotlib canvas:
@@ -2135,9 +2161,10 @@ class FigureEditor:
         self.canvas = canvas_widget.canvas
         self._texts = []
         self._legends = []
-        self._drag = None      # (artist, press_disp_xy, artist_disp0)
+        self._drag = None      # (artist, press_disp_xy, artist_disp0, start_pos)
         self.snap_enabled = False
         self.snap_step = 0.01  # grid step in figure-relative (0–1) coordinates
+        self.undo_stack = QUndoStack()
         self.canvas.mpl_connect('button_press_event', self._on_press)
         self.canvas.mpl_connect('motion_notify_event', self._on_motion)
         self.canvas.mpl_connect('button_release_event', self._on_release)
@@ -2214,11 +2241,12 @@ class FigureEditor:
         t = self._text_at(event)
         if t is not None and self._legend_at(event) is None:
             x0, y0 = t.get_transform().transform(t.get_position())
-            self._drag = (t, (event.x, event.y), (x0, y0))
+            start_pos = tuple(t.get_position())
+            self._drag = (t, (event.x, event.y), (x0, y0), start_pos)
 
     def _on_motion(self, event):
         if self._drag is not None:
-            t, (px, py), (x0, y0) = self._drag
+            t, (px, py), (x0, y0), _start = self._drag
             if event.x is None:
                 return
             newdisp = (x0 + (event.x - px), y0 + (event.y - py))
@@ -2244,6 +2272,11 @@ class FigureEditor:
             QCursor(Qt.CursorShape.OpenHandCursor if over else Qt.CursorShape.ArrowCursor))
 
     def _on_release(self, event):
+        if self._drag is not None:
+            t, start_pos = self._drag[0], self._drag[3]
+            end_pos = tuple(t.get_position())
+            if end_pos != start_pos:
+                self.undo_stack.push(_MoveCommand(t, start_pos, end_pos, self.canvas))
         self._drag = None
 
     # ── editors ────────────────────────────────────────────────────────────
@@ -2318,11 +2351,33 @@ class PlotCanvas(QWidget):
             _b.setObjectName('figToolbarBtn')
             self.toolbar.addWidget(_b)
 
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.VLine)
+        sep2.setFrameShadow(QFrame.Shadow.Sunken)
+        sep2.setFixedWidth(1)
+        sep2.setStyleSheet('background: #B8C5D3;')
+        self.toolbar.addWidget(sep2)
+
+        self.btn_zoom_out = QToolButton()
+        self.btn_zoom_out.setText('−')
+        self.btn_zoom_out.setToolTip('Zoom out')
+        self.btn_zoom_in = QToolButton()
+        self.btn_zoom_in.setText('+')
+        self.btn_zoom_in.setToolTip('Zoom in')
+        for _b in (self.btn_zoom_out, self.btn_zoom_in):
+            _b.setObjectName('figToolbarBtn')
+            self.toolbar.addWidget(_b)
+
         self.btn_fit.clicked.connect(self._toolbar_fit)
         self.btn_autoscale.clicked.connect(self._toolbar_fit)
         self.btn_grid.toggled.connect(self._toolbar_grid)
         self.btn_update_size.clicked.connect(lambda _checked=False: self.size_update_requested.emit())
         self.btn_save_fig.clicked.connect(self.toolbar.save_figure)
+        self.btn_zoom_out.clicked.connect(lambda: self._zoom_by(1 / 1.25))
+        self.btn_zoom_in.clicked.connect(lambda: self._zoom_by(1.25))
+
+        # scroll-to-zoom on the matplotlib canvas widget
+        self.canvas.wheelEvent = self._wheel_zoom
 
         card_lay.addWidget(self.toolbar)
 
@@ -2361,6 +2416,41 @@ class PlotCanvas(QWidget):
         for ax in self.fig.axes:
             ax.grid(checked, linestyle='--', linewidth=0.5, alpha=0.5, color='#94A3B8')
         self.canvas.draw_idle()
+
+    def _zoom_by(self, factor: float, cx: float = None, cy: float = None):
+        for ax in self.fig.axes:
+            xlim = ax.get_xlim()
+            ylim = ax.get_ylim()
+            xc = cx if cx is not None else (xlim[0] + xlim[1]) / 2
+            yc = cy if cy is not None else (ylim[0] + ylim[1]) / 2
+            xw = (xlim[1] - xlim[0]) / factor / 2
+            yw = (ylim[1] - ylim[0]) / factor / 2
+            ax.set_xlim(xc - xw, xc + xw)
+            ax.set_ylim(yc - yw, yc + yw)
+        self.canvas.draw_idle()
+
+    def _wheel_zoom(self, event):
+        delta = event.angleDelta().y()
+        if delta == 0 or not self.fig.axes:
+            event.ignore()
+            return
+        factor = 1.15 if delta > 0 else 1 / 1.15
+        # map cursor to data coordinates on the first axes
+        ax = self.fig.axes[0]
+        try:
+            pos = event.position()
+            x_disp = pos.x()
+            y_disp = self.canvas.height() - pos.y()
+            pt = ax.transData.inverted().transform([x_disp, y_disp])
+            cx, cy = float(pt[0]), float(pt[1])
+            xl, xr = ax.get_xlim()
+            yb, yt = ax.get_ylim()
+            if not (xl <= cx <= xr and yb <= cy <= yt):
+                cx, cy = None, None
+        except Exception:
+            cx, cy = None, None
+        self._zoom_by(factor, cx, cy)
+        event.accept()
 
     def set_fig_size(self, w_in: float, h_in: float):
         """Lock both the matplotlib figure and the on-screen widget to a fixed size."""
@@ -2492,7 +2582,7 @@ def _add_legend(ax, handles: list, labels: list, s: dict):
         return
     fs = s.get('legend_fontsize', max(6, s['fontsize'] - 1))
     leg = ax.legend(handles, labels, loc=s['legend_loc'],
-                    fontsize=fs, fancybox=False)
+                    fontsize=fs, fancybox=False, labelspacing=0.25)
     frame = leg.get_frame()
     # Background — transparent by default.
     if s.get('legend_transparent_bg', True):
@@ -3097,6 +3187,9 @@ class MainWindow(QMainWindow):
         vlay.addWidget(self.header)
         vlay.addWidget(splitter)
         self.setCentralWidget(root)
+
+        undo_sc = QShortcut(QKeySequence.StandardKey.Undo, self)
+        undo_sc.activated.connect(self.editor.undo_stack.undo)
 
         self.controls.plot_requested.connect(self._do_plot)
         self.header.mode_changed.connect(self._on_mode_change)
