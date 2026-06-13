@@ -40,6 +40,23 @@ class WindowChromeTest(unittest.TestCase):
         win.mode_actions["xrd"].trigger()
         self.assertEqual(win.controls.current_mode(), "xrd")
 
+    def test_core_panels_are_dock_widgets(self):
+        from PyQt6.QtWidgets import QDockWidget
+        qapp()
+        win = spectra_app.MainWindow()
+        names = {d.objectName() for d in win.findChildren(QDockWidget)}
+        self.assertIn("dock_build", names)
+        self.assertIn("dock_style", names)
+        self.assertIs(win.centralWidget(), win.canvas)
+
+    def test_view_menu_lists_dock_toggles(self):
+        qapp()
+        win = spectra_app.MainWindow()
+        view_actions = [a.text() for a in win.m_view.actions()]
+        joined = " ".join(view_actions)
+        self.assertIn("Build", joined)
+        self.assertIn("Plot Style", joined)
+
 
 if __name__ == "__main__":
     unittest.main()

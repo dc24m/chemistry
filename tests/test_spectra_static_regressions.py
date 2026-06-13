@@ -48,7 +48,7 @@ class SpectraStaticRegressionTest(unittest.TestCase):
         source = SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("take_dock_groups()", source)
-        self.assertIn("setObjectName('dockCard')", source)
+        self.assertIn("setObjectName(\"dock_style\")", source)
 
     def test_trace_color_fallbacks_are_black(self):
         source = SOURCE.read_text(encoding="utf-8")

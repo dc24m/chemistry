@@ -2771,77 +2771,51 @@ class MainWindow(QMainWindow):
 
         self._current_mode = MODES[0]['key']
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(1)
-
         self.controls = ControlPanel()
         self.canvas = PlotCanvas()
         self.controls._canvas = self.canvas
         self.editor = FigureEditor(self.canvas)
         self._build_chrome()
 
-        # ── Dock card (bottom control strip) ─────────────────────────────
-        dock = QWidget()
-        dock.setObjectName('dock')
-        dock_lay = QVBoxLayout(dock)
-        dock_lay.setContentsMargins(14, 6, 14, 10)
-        dock_lay.setSpacing(0)
+        # Central widget: the plot canvas
+        self.setCentralWidget(self.canvas)
 
-        dock_card = QWidget()
-        dock_card.setObjectName('dockCard')
-        dock_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        add_shadow(dock_card, blur=28, y=8, alpha=28)
-        dock_card_lay = QHBoxLayout(dock_card)
-        dock_card_lay.setContentsMargins(12, 10, 12, 10)
-        dock_card_lay.setSpacing(12)
+        # ── Left dock: Build / Parameters (the ControlPanel) ────────────────
+        self.dock_build = QDockWidget("Build", self)
+        self.dock_build.setObjectName("dock_build")
+        self.dock_build.setWidget(self.controls)
+        self.dock_build.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock_build)
+
+        # ── Bottom dock: Plot Style (the four style groups) ─────────────────
+        style_host = QWidget()
+        style_host.setObjectName("plotStyleHost")
+        style_lay = QHBoxLayout(style_host)
+        style_lay.setContentsMargins(8, 6, 8, 8)
+        style_lay.setSpacing(10)
         for group in self.controls.take_dock_groups():
-            # Expanding lets Qt stretch all groups to the same height — no more
-            # janky height mismatch between Ticks / Numbers / Legend / Plot Box.
             group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-            dock_card_lay.addWidget(group)
+            style_lay.addWidget(group)
+        style_lay.addStretch()
+        style_scroll = QScrollArea()
+        style_scroll.setObjectName("plotStyleScroll")
+        style_scroll.setWidget(style_host)
+        style_scroll.setWidgetResizable(True)
+        style_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        style_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        dock_scroll = QScrollArea()
-        dock_scroll.setWidget(dock_card)
-        dock_scroll.setWidgetResizable(True)
-        dock_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        dock_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        dock_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        dock_scroll.setObjectName('dockScroll')
-        dock_lay.addWidget(dock_scroll)
+        self.dock_style = QDockWidget("Plot Style", self)
+        self.dock_style.setObjectName("dock_style")
+        self.dock_style.setWidget(style_scroll)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.dock_style)
 
-        # ── Right pane: canvas + resizable dock via vertical splitter ─────
-        self.right_pane = QWidget()
-        self.right_pane.setObjectName('rightPane')
-        right_lay = QVBoxLayout(self.right_pane)
-        right_lay.setContentsMargins(0, 0, 0, 0)
-        right_lay.setSpacing(0)
+        # View-menu dock toggles (inserted before the Dark Mode action)
+        self.m_view.insertAction(self.act_dark, self.dock_build.toggleViewAction())
+        self.m_view.insertAction(self.act_dark, self.dock_style.toggleViewAction())
+        self.m_view.insertSeparator(self.act_dark)
 
-        self.v_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.v_splitter.setObjectName('vSplitter')
-        self.v_splitter.setHandleWidth(5)
-        self.v_splitter.addWidget(self.canvas)
-        self.v_splitter.addWidget(dock)
-        self.v_splitter.setStretchFactor(0, 1)
-        self.v_splitter.setStretchFactor(1, 0)
-        # dock starts at ~220px; canvas takes the rest
-        self.v_splitter.setSizes([560, 220])
-
-        right_lay.addWidget(self.v_splitter, 1)
-
-        splitter.addWidget(self.controls)
-        splitter.addWidget(self.right_pane)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-
-        # Root: header bar on top, sidebar+canvas splitter below
-        root = QWidget()
-        root.setObjectName('appRoot')
-        vlay = QVBoxLayout(root)
-        vlay.setContentsMargins(0, 0, 0, 0)
-        vlay.setSpacing(0)
-
-        vlay.addWidget(splitter)
-        self.setCentralWidget(root)
+        self.resizeDocks([self.dock_build], [360], Qt.Orientation.Horizontal)
 
         self._has_plotted = False
         self._plot_called_for_test = False
