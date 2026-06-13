@@ -27,10 +27,13 @@ try:
         QSizePolicy, QDialog, QDialogButtonBox, QFormLayout,
         QButtonGroup, QSplashScreen, QProgressBar,
         QToolButton, QFrame, QSlider,
+        QToolBar, QStatusBar, QDockWidget, QTableWidget, QTableWidgetItem,
+        QHeaderView, QPlainTextEdit,
     )
-    from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize
+    from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize, QSettings, QByteArray
     from PyQt6.QtGui import (QFont, QColor, QCursor, QPixmap, QFontDatabase,
-                              QUndoStack, QUndoCommand, QKeySequence, QShortcut)
+                              QUndoStack, QUndoCommand, QKeySequence, QShortcut,
+                              QAction, QActionGroup)
 except ModuleNotFoundError as exc:
     missing = exc.name or 'a required package'
     raise SystemExit(
@@ -2775,6 +2778,7 @@ class MainWindow(QMainWindow):
         self.canvas = PlotCanvas()
         self.controls._canvas = self.canvas
         self.editor = FigureEditor(self.canvas)
+        self._build_chrome()
 
         # ── Dock card (bottom control strip) ─────────────────────────────
         dock = QWidget()
@@ -2822,9 +2826,7 @@ class MainWindow(QMainWindow):
         # dock starts at ~220px; canvas takes the rest
         self.v_splitter.setSizes([560, 220])
 
-        self.statusbar = BottomStatusBar()
         right_lay.addWidget(self.v_splitter, 1)
-        right_lay.addWidget(self.statusbar)
 
         splitter.addWidget(self.controls)
         splitter.addWidget(self.right_pane)
@@ -2838,8 +2840,6 @@ class MainWindow(QMainWindow):
         vlay.setContentsMargins(0, 0, 0, 0)
         vlay.setSpacing(0)
 
-        self.header = TopHeader()
-        vlay.addWidget(self.header)
         vlay.addWidget(splitter)
         self.setCentralWidget(root)
 
@@ -2847,11 +2847,9 @@ class MainWindow(QMainWindow):
         undo_sc.activated.connect(self.editor.undo_stack.undo)
 
         self._has_plotted = False
+        self._plot_called_for_test = False
         self.controls.plot_requested.connect(self._do_plot)
         self.controls.live_update_requested.connect(self._auto_replot)
-        self.header.plot_requested.connect(self._do_plot)
-        self.header.mode_changed.connect(self._on_mode_change)
-        self.header.theme_toggled.connect(self._on_theme_toggle)
         self.controls.spin_fw.valueChanged.connect(self._mark_canvas_size_pending)
         self.controls.spin_fh.valueChanged.connect(self._mark_canvas_size_pending)
         self.canvas.size_update_requested.connect(self._update_canvas_size)
@@ -2859,8 +2857,124 @@ class MainWindow(QMainWindow):
         self.controls.spin_snap_step.valueChanged.connect(self._update_snap)
         self.canvas.canvas.mpl_connect('motion_notify_event', self._on_coord_motion)
 
-        self.statusbar.show_message('Ready — add files to a panel and click Plot.')
+        self._status_message('Ready — add files to a panel and click Plot.')
         self._apply_accent(MODES[0]['accent'])
+
+    def _build_chrome(self):
+        self.act_plot = QAction("Plot", self)
+        self.act_plot.setShortcut("Ctrl+Return")
+        self.act_plot.triggered.connect(self._do_plot)
+
+        self.act_save = QAction("Save Figure…", self)
+        self.act_save.setShortcut(QKeySequence.StandardKey.Save)
+        self.act_save.triggered.connect(lambda: self.controls._save("png"))
+
+        self.act_undo = QAction("Undo", self)
+        self.act_undo.setShortcut(QKeySequence.StandardKey.Undo)
+        self.act_undo.triggered.connect(self.editor.undo_stack.undo)
+
+        self.act_fit = QAction("Fit to Data", self)
+        self.act_fit.triggered.connect(self.canvas._toolbar_fit)
+        self.act_grid = QAction("Grid", self)
+        self.act_grid.setCheckable(True)
+        self.act_grid.toggled.connect(self.canvas._toolbar_grid)
+        self.act_zoom_in = QAction("Zoom In", self)
+        self.act_zoom_in.triggered.connect(lambda: self.canvas._zoom_by(1.25))
+        self.act_zoom_out = QAction("Zoom Out", self)
+        self.act_zoom_out.triggered.connect(lambda: self.canvas._zoom_by(1 / 1.25))
+
+        self.act_dark = QAction("Dark Mode", self)
+        self.act_dark.setCheckable(True)
+        self.act_dark.toggled.connect(self._on_theme_toggle)
+
+        self.act_quit = QAction("Exit", self)
+        self.act_quit.setShortcut("Ctrl+Q")
+        self.act_quit.triggered.connect(self.close)
+
+        self.act_about = QAction("About SPECTRAplot", self)
+        self.act_about.triggered.connect(self._show_about)
+
+        self.act_reset_layout = QAction("Reset Layout", self)
+        self.act_reset_layout.triggered.connect(self._reset_layout)
+
+        self.mode_actions = {}
+        self._mode_group = QActionGroup(self)
+        self._mode_group.setExclusive(True)
+        for m in MODES:
+            a = QAction(m["label"], self)
+            a.setCheckable(True)
+            a.setObjectName(f"modeAction_{m['key']}")
+            a.triggered.connect(lambda _checked, k=m["key"]: self._on_mode_change(k))
+            self._mode_group.addAction(a)
+            self.mode_actions[m["key"]] = a
+        self.mode_actions[MODES[0]["key"]].setChecked(True)
+
+        mb = self.menuBar()
+        m_file = mb.addMenu("&File")
+        m_file.addAction(self.act_save)
+        m_file.addSeparator()
+        m_file.addAction(self.act_quit)
+        m_edit = mb.addMenu("&Edit")
+        m_edit.addAction(self.act_undo)
+        self.m_view = mb.addMenu("&View")
+        self.m_view.addAction(self.act_dark)
+        self.m_view.addAction(self.act_reset_layout)
+        self.m_view.addSeparator()
+        m_plot = mb.addMenu("&Plot")
+        m_plot.addAction(self.act_plot)
+        m_plot.addSeparator()
+        m_plot.addAction(self.act_fit)
+        m_plot.addAction(self.act_grid)
+        m_plot.addAction(self.act_zoom_in)
+        m_plot.addAction(self.act_zoom_out)
+        m_plot.addSeparator()
+        for a in self.mode_actions.values():
+            m_plot.addAction(a)
+        m_help = mb.addMenu("&Help")
+        m_help.addAction(self.act_about)
+
+        tb = QToolBar("Main", self)
+        tb.setObjectName("mainToolbar")
+        tb.setMovable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        wm = QLabel("SPECTRAplot")
+        wm.setObjectName("toolbarWordmark")
+        tb.addWidget(wm)
+        tb.addSeparator()
+        tb.addAction(self.act_plot)
+        tb.addAction(self.act_save)
+        tb.addSeparator()
+        for a in self.mode_actions.values():
+            tb.addAction(a)
+        tb.addSeparator()
+        tb.addAction(self.act_fit)
+        tb.addAction(self.act_zoom_out)
+        tb.addAction(self.act_zoom_in)
+        tb.addAction(self.act_grid)
+        self.addToolBar(tb)
+        self.toolbar = tb
+
+        sb = self.statusBar()
+        self._sb_ready = QLabel("● Ready")
+        self._sb_ready.setObjectName("readyDot")
+        self._sb_coord = QLabel("")
+        self._sb_coord.setObjectName("coordLabel")
+        sb.addPermanentWidget(self._sb_coord)
+        sb.insertWidget(0, self._sb_ready)
+
+    def _show_about(self):
+        QMessageBox.about(self, "SPECTRAplot",
+                          "SPECTRAplot — spectrometry visualization\nby arnold wijoyo")
+
+    def _reset_layout(self):
+        if getattr(self, "_default_state", None) is not None:
+            self.restoreState(self._default_state)
+
+    def _status_message(self, msg: str):
+        self.statusBar().showMessage(msg)
+
+    def _status_ready(self, ok: bool):
+        self._sb_ready.setText("● Ready" if ok else "● Busy")
 
     def _apply_accent(self, accent: str):
         QApplication.instance().setStyleSheet(build_style(accent, _APP_DARK))
@@ -2873,18 +2987,16 @@ class MainWindow(QMainWindow):
     def _on_theme_toggle(self, dark: bool):
         global _APP_DARK
         _APP_DARK = dark
-        self.header.btn_theme.setText('Light' if dark else 'Dark')
-        self.header.apply_theme(dark)
         accent = MODE_BY_KEY[self._current_mode]['accent']
         QApplication.instance().setStyleSheet(build_style(accent, dark))
 
     def _on_coord_motion(self, event):
         if event.inaxes is None:
-            self.statusbar.clear_coords()
+            self._sb_coord.clear()
             return
         x, y = event.xdata, event.ydata
         if x is None or y is None:
-            self.statusbar.clear_coords()
+            self._sb_coord.clear()
             return
         mode = self._current_mode
         if mode == 'pl':
@@ -2901,7 +3013,7 @@ class MainWindow(QMainWindow):
             text = f'Voltage: {x:.3g} V   Current: {y:.4g}'
         else:
             text = f'x: {x:.3f}   y: {y:.4g}'
-        self.statusbar.update_coords(text)
+        self._sb_coord.setText(text)
 
     def _mark_canvas_size_pending(self, *_):
         requested = (self.controls.spin_fw.value(), self.controls.spin_fh.value())
@@ -2911,7 +3023,7 @@ class MainWindow(QMainWindow):
         self.canvas.set_fig_size(
             self.controls.spin_fw.value() / 100, self.controls.spin_fh.value() / 100)
         self.canvas.canvas.draw_idle()
-        self.statusbar.show_message(
+        self._status_message(
             f'Figure size updated to {self.controls.spin_fw.value()} x {self.controls.spin_fh.value()} px.'
         )
 
@@ -2927,6 +3039,7 @@ class MainWindow(QMainWindow):
             self._do_plot(silent=True)
 
     def _do_plot(self, silent: bool = False):
+        self._plot_called_for_test = True
         s = self.controls.settings()
         if s['plot_type'] == 'iv':
             problem = validate_iv_sets(s.get('iv_sets', []))
@@ -2944,7 +3057,7 @@ class MainWindow(QMainWindow):
                         'Add at least one file to a panel, then click Plot.'
                     )
                 return
-        self.statusbar.show_message('Plotting…')
+        self._status_message('Plotting…')
         self.canvas.set_fig_size(s['fig_width'] / 100, s['fig_height'] / 100)
         self.editor.set_snap(s['snap_enabled'], s['snap_step'])
         QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
@@ -2953,11 +3066,11 @@ class MainWindow(QMainWindow):
             msg = do_plot(self.canvas.get_figure(), s)
             self.editor.refresh()
             self._has_plotted = True
-            self.statusbar.show_message(msg + '   ·   Double-click figure text to edit · drag to reposition.')
+            self._status_message(msg + '   ·   Double-click figure text to edit · drag to reposition.')
         except Exception as e:
             if not silent:
                 QMessageBox.critical(self, 'Plot Error', str(e))
-            self.statusbar.show_message(f'Error: {e}')
+            self._status_message(f'Error: {e}')
         finally:
             QApplication.restoreOverrideCursor()
 
