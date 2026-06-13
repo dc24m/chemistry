@@ -32,7 +32,7 @@ try:
     )
     from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize, QSettings, QByteArray
     from PyQt6.QtGui import (QFont, QColor, QCursor, QPixmap, QFontDatabase,
-                              QUndoStack, QUndoCommand, QKeySequence, QShortcut,
+                              QUndoStack, QUndoCommand, QKeySequence,
                               QAction, QActionGroup)
 except ModuleNotFoundError as exc:
     missing = exc.name or 'a required package'
@@ -2843,9 +2843,6 @@ class MainWindow(QMainWindow):
         vlay.addWidget(splitter)
         self.setCentralWidget(root)
 
-        undo_sc = QShortcut(QKeySequence.StandardKey.Undo, self)
-        undo_sc.activated.connect(self.editor.undo_stack.undo)
-
         self._has_plotted = False
         self._plot_called_for_test = False
         self.controls.plot_requested.connect(self._do_plot)
@@ -2959,8 +2956,8 @@ class MainWindow(QMainWindow):
         self._sb_ready.setObjectName("readyDot")
         self._sb_coord = QLabel("")
         self._sb_coord.setObjectName("coordLabel")
+        sb.addPermanentWidget(self._sb_ready)
         sb.addPermanentWidget(self._sb_coord)
-        sb.insertWidget(0, self._sb_ready)
 
     def _show_about(self):
         QMessageBox.about(self, "SPECTRAplot",
@@ -3040,6 +3037,7 @@ class MainWindow(QMainWindow):
 
     def _do_plot(self, silent: bool = False):
         self._plot_called_for_test = True
+        self._status_ready(False)
         s = self.controls.settings()
         if s['plot_type'] == 'iv':
             problem = validate_iv_sets(s.get('iv_sets', []))
@@ -3073,6 +3071,7 @@ class MainWindow(QMainWindow):
             self._status_message(f'Error: {e}')
         finally:
             QApplication.restoreOverrideCursor()
+            self._status_ready(True)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

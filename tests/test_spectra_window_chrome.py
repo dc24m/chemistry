@@ -30,7 +30,7 @@ class WindowChromeTest(unittest.TestCase):
         qapp()
         win = spectra_app.MainWindow()
         from unittest.mock import patch
-        with patch("spectra_app.QMessageBox.information"):
+        with patch("spectra_app.QMessageBox.information"), patch("spectra_app.QMessageBox.critical"):
             win.act_plot.trigger()
         self.assertTrue(win._plot_called_for_test)
 
