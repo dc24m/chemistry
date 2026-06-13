@@ -22,13 +22,13 @@ try:
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
         QAbstractSpinBox, QCheckBox, QLineEdit, QFileDialog, QScrollArea,
-        QGroupBox, QColorDialog, QMessageBox, QListWidget,
+        QGroupBox, QColorDialog, QMessageBox, QListWidget, QListWidgetItem,
         QAbstractItemView, QSplitter, QTabWidget, QGridLayout,
         QSizePolicy, QDialog, QDialogButtonBox, QFormLayout,
         QButtonGroup, QSplashScreen, QProgressBar, QGraphicsDropShadowEffect,
         QToolButton, QFrame, QSlider,
     )
-    from PyQt6.QtCore import Qt, pyqtSignal, QEvent
+    from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize
     from PyQt6.QtGui import (QFont, QColor, QCursor, QPixmap, QFontDatabase,
                               QUndoStack, QUndoCommand, QKeySequence, QShortcut)
 except ModuleNotFoundError as exc:
@@ -344,10 +344,9 @@ QCheckBox::indicator:hover {{ border-color: {ACCENT}; }}
 
 /* ── Inner data tabs ────────────────────────────────────────────────────── */
 QTabWidget::pane {{
-    border: 1px solid {BORDER};
-    border-top: none;
+    border: none;
     background: {BG};
-    border-radius: 0 8px 8px 8px;
+    border-radius: 0;
 }}
 QTabBar::tab {{
     background: {SURF};
@@ -431,6 +430,28 @@ QLabel#dockTitle {{
 }}
 #figToolbar QLabel {{ color: #CCCCCC; font-size: 12px; }}
 #figToolbar QLabel#muted {{ color: #888888; }}
+
+/* ── Header Plot button (prominent, accent-filled) ──────────────────────── */
+QPushButton#headerPlotBtn {{
+    background: {ACCENT};
+    color: #171717;
+    border: 1px solid {ACCENT};
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 3px;
+    padding: 0px 22px;
+}}
+QPushButton#headerPlotBtn:hover {{
+    background: {darken(ACCENT, 0.12)};
+    border-color: {darken(ACCENT, 0.12)};
+    color: #FFFFFF;
+}}
+QPushButton#headerPlotBtn:pressed {{
+    background: {darken(ACCENT, 0.25)};
+    border-color: {darken(ACCENT, 0.25)};
+    color: #FFFFFF;
+}}
 
 /* ── Theme toggle button ────────────────────────────────────────────────── */
 QPushButton#themeToggle {{
@@ -852,6 +873,7 @@ class ModeTabBar(QWidget):
 class TopHeader(QWidget):
     mode_changed = pyqtSignal(str)
     theme_toggled = pyqtSignal(bool)
+    plot_requested = pyqtSignal()
 
     # Fallback font stack if Montserrat is unavailable
     _TITLE_FF = "'Montserrat','Segoe UI Variable','Segoe UI','Inter',sans-serif"
@@ -906,6 +928,16 @@ class TopHeader(QWidget):
 
         lay.addStretch()
 
+        self.btn_plot = QPushButton('PLOT')
+        self.btn_plot.setObjectName('headerPlotBtn')
+        self.btn_plot.setFixedHeight(40)
+        self.btn_plot.setMinimumWidth(110)
+        self.btn_plot.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_plot.clicked.connect(self.plot_requested)
+        add_shadow(self.btn_plot, blur=16, y=3, alpha=30)
+        lay.addWidget(self.btn_plot)
+        lay.addSpacing(12)
+
         self.btn_theme = QPushButton('Dark')
         self.btn_theme.setObjectName('themeToggle')
         self.btn_theme.setCheckable(True)
@@ -945,11 +977,23 @@ class TraceEditDialog(QDialog):
         self.edit_name = QLineEdit(trace.get('display_name', ''))
         form.addRow('Trace name', self.edit_name)
 
+        # Read-only original filename so the source is visible behind a rename.
+        path = trace.get('path', '')
+        lbl_file = QLabel(os.path.basename(path) or '—')
+        lbl_file.setObjectName('hint')
+        lbl_file.setWordWrap(True)
+        lbl_file.setToolTip(path)
+        lbl_file.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        form.addRow('File', lbl_file)
+
         self.color = ColorButton(trace.get('color', '#000000'))
         form.addRow('Color', self.color)
 
         self.chk_gradient = QCheckBox('Use gradient color')
         self.chk_gradient.setChecked(bool(trace.get('use_auto_gradient_color', True)))
+        # Picking a custom color opts this trace out of the panel gradient so the
+        # chosen color actually renders even when gradient mode is on.
+        self.color.color_changed.connect(lambda _: self.chk_gradient.setChecked(False))
         form.addRow('', self.chk_gradient)
 
         self.chk_visible = QCheckBox('Visible')
@@ -963,7 +1007,7 @@ class TraceEditDialog(QDialog):
         self.spin_lw.setDecimals(1)
         lw = trace.get('linewidth')
         self.chk_lw.setChecked(lw is not None)
-        self.spin_lw.setValue(float(lw) if lw is not None else 1.5)
+        self.spin_lw.setValue(float(lw) if lw is not None else 2.0)
         self.spin_lw.setEnabled(lw is not None)
         self.chk_lw.toggled.connect(self.spin_lw.setEnabled)
         lw_row = QHBoxLayout()
@@ -996,9 +1040,58 @@ class TraceEditDialog(QDialog):
         self.trace['linestyle'] = self.combo_ls.currentText()
 
 
+# ── Per-row trace widget (name label + eye toggle) ───────────────────────────
+
+class _TraceRow(QWidget):
+    """Label + eye button for one trace entry in the file list."""
+
+    def __init__(self, trace: dict, on_change=None, parent=None):
+        super().__init__(parent)
+        self._trace = trace
+        self._on_change = on_change
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 0, 2, 0)
+        lay.setSpacing(4)
+
+        self.lbl = QLabel()
+        self.lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        self.btn = QToolButton()
+        self.btn.setFixedSize(26, 22)
+        self.btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn.clicked.connect(self._toggle)
+
+        lay.addWidget(self.lbl, 1)
+        lay.addWidget(self.btn)
+        self._refresh()
+
+    def _toggle(self):
+        self._trace['visible'] = not self._trace.get('visible', True)
+        self._refresh()
+        if self._on_change is not None:
+            self._on_change()
+
+    def _refresh(self):
+        visible = self._trace.get('visible', True)
+        self.lbl.setText(self._trace['display_name'])
+        self.lbl.setStyleSheet('' if visible else 'color: #A8A8A8;')
+        ink = '#444444' if visible else '#C0C0C0'
+        self.btn.setStyleSheet(
+            f'QToolButton {{ border: none; background: transparent; font-size: 14px; '
+            f'color: {ink}; padding: 0px; }}'
+            f'QToolButton:hover {{ background: rgba(0,0,0,0.08); border-radius: 3px; }}'
+        )
+        self.btn.setText('👁')
+
+
 # ── Per-panel file widget ─────────────────────────────────────────────────────
 
 class PanelFileWidget(QWidget):
+    # Emitted whenever a trace's data affecting the figure changes (visibility,
+    # color, name, gradient, add/remove) so the app can live-refresh the plot.
+    changed = pyqtSignal()
+
     def __init__(self, index: int, parent=None):
         super().__init__(parent)
         self.index = index
@@ -1011,7 +1104,7 @@ class PanelFileWidget(QWidget):
         self.lst = QListWidget()
         self.lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.lst.setMinimumHeight(75)
-        self.lst.setMaximumHeight(130)
+        self.lst.setMaximumHeight(220)
         self.lst.itemDoubleClicked.connect(self._edit_double)
         lay.addWidget(self.lst)
 
@@ -1036,6 +1129,7 @@ class PanelFileWidget(QWidget):
         self.chk_gradient = QCheckBox('Use gradient colors')
         self.chk_gradient.setChecked(True)
         self.chk_gradient.toggled.connect(self._toggle_gradient)
+        self.chk_gradient.toggled.connect(self.changed)
         lay.addWidget(self.chk_gradient)
 
         self._grad_rows: list[QWidget] = []
@@ -1049,6 +1143,7 @@ class PanelFileWidget(QWidget):
             lbl.setFixedWidth(78)
             lbl.setObjectName('fieldlbl')
             btn = ColorButton(default)
+            btn.color_changed.connect(lambda _: self.changed.emit())
             row.addWidget(lbl)
             row.addWidget(btn)
             setattr(self, attr, btn)
@@ -1062,14 +1157,10 @@ class PanelFileWidget(QWidget):
         for rw in self._grad_rows:
             rw.setVisible(on)
 
-    def _item_text(self, tr: dict) -> str:
-        txt = tr['display_name']
-        if not tr.get('visible', True):
-            txt += '  · hidden'
-        return txt
-
     def _refresh_item(self, row: int):
-        self.lst.item(row).setText(self._item_text(self.traces[row]))
+        widget = self.lst.itemWidget(self.lst.item(row))
+        if isinstance(widget, _TraceRow):
+            widget._refresh()
 
     def _add(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -1077,12 +1168,19 @@ class PanelFileWidget(QWidget):
             '', 'Spectroscopy files (*.csv *.tsv *.xy);;All files (*.*)'
         )
         existing = {t['path'] for t in self.traces}
+        added = False
         for p in paths:
             if p not in existing:
                 tr = make_trace(p)
                 self.traces.append(tr)
-                self.lst.addItem(self._item_text(tr))
+                item = QListWidgetItem()
+                item.setSizeHint(QSize(0, 30))
+                self.lst.addItem(item)
+                self.lst.setItemWidget(item, _TraceRow(tr, self.changed.emit))
                 existing.add(p)
+                added = True
+        if added:
+            self.changed.emit()
 
     def _remove(self):
         rows = sorted(
@@ -1091,6 +1189,8 @@ class PanelFileWidget(QWidget):
         for r in rows:
             self.lst.takeItem(r)
             self.traces.pop(r)
+        if rows:
+            self.changed.emit()
 
     def _edit_double(self, item):
         self._edit_trace(self.lst.row(item))
@@ -1110,6 +1210,7 @@ class PanelFileWidget(QWidget):
         if dlg.exec():
             dlg.apply()
             self._refresh_item(row)
+            self.changed.emit()
 
     def file_entries(self) -> list:
         # Return copies so plotting never mutates the live trace records.
@@ -1167,14 +1268,13 @@ class IVDataSetWidget(QWidget):
         self._refresh_sweep_labels()
 
     def _sweep_row(self, title: str, browse_handler, clear_handler):
-        row = QHBoxLayout()
+        row = QVBoxLayout()
         row.setSpacing(6)
         title_label = QLabel(title)
         title_label.setObjectName('fieldlbl')
-        title_label.setFixedWidth(88)
         path_label = QLabel('No CSV selected')
         path_label.setObjectName('hint')
-        path_label.setMinimumWidth(40)
+        path_label.setMinimumWidth(120)
         path_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         btn_browse = QPushButton('Browse')
         btn_browse.setObjectName('secondary')
@@ -1183,10 +1283,20 @@ class IVDataSetWidget(QWidget):
         btn_clear.setFixedWidth(34)
         btn_browse.clicked.connect(browse_handler)
         btn_clear.clicked.connect(clear_handler)
-        row.addWidget(title_label)
-        row.addWidget(path_label, 1)
-        row.addWidget(btn_browse)
-        row.addWidget(btn_clear)
+
+        file_row = QHBoxLayout()
+        file_row.setSpacing(6)
+        file_row.addWidget(title_label)
+        file_row.addWidget(path_label, 1)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(6)
+        action_row.addStretch(1)
+        action_row.addWidget(btn_browse)
+        action_row.addWidget(btn_clear)
+
+        row.addLayout(file_row)
+        row.addLayout(action_row)
         return path_label, row
 
     def _refresh_sweep_labels(self):
@@ -1263,16 +1373,19 @@ def add_shadow(widget, blur: int = 24, y: int = 6, alpha: int = 35):
 
 class ControlPanel(QScrollArea):
     plot_requested = pyqtSignal()
+    live_update_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('sidebar')
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setFixedWidth(326)
+        self.setFixedWidth(368)
 
         root = QWidget()
         root.setObjectName('sidebar')
+        root.setMinimumWidth(0)
+        root.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.setWidget(root)
 
         lay = QVBoxLayout(root)
@@ -1312,6 +1425,7 @@ class ControlPanel(QScrollArea):
         self.panel_widgets: list[PanelFileWidget] = []
         for i in range(5):
             pw = PanelFileWidget(i)
+            pw.changed.connect(self.live_update_requested)
             self.panel_widgets.append(pw)
             self.panel_tabs.addTab(pw, f'P{i+1}')
             if i > 0:
@@ -1365,7 +1479,7 @@ class ControlPanel(QScrollArea):
         agl.addLayout(xrow)
 
         self.chk_auto_x = QCheckBox('Auto X (fit to data)')
-        self.chk_auto_x.setChecked(False)
+        self.chk_auto_x.setChecked(True)
         agl.addWidget(self.chk_auto_x)
 
         # Per-panel X limits — off by default keeps the global behavior above.
@@ -1420,7 +1534,7 @@ class ControlPanel(QScrollArea):
         agl.addLayout(yrow)
 
         self.chk_auto_y = QCheckBox('Auto Y (fit to data)')
-        self.chk_auto_y.setChecked(False)
+        self.chk_auto_y.setChecked(True)
         agl.addWidget(self.chk_auto_y)
         agl.addWidget(_sep())
 
@@ -1463,11 +1577,11 @@ class ControlPanel(QScrollArea):
         sgl.setSpacing(9)
 
         self.spin_lw = FlatDoubleSpinBox()
-        self.spin_lw.setRange(0.5, 6.0); self.spin_lw.setSingleStep(0.5); self.spin_lw.setValue(1.5)
+        self.spin_lw.setRange(0.5, 6.0); self.spin_lw.setSingleStep(0.5); self.spin_lw.setValue(2.0)
         sgl.addLayout(_labeled('Line width', self.spin_lw))
 
         self.spin_fs = FlatSpinBox()
-        self.spin_fs.setRange(6, 28); self.spin_fs.setValue(12)
+        self.spin_fs.setRange(6, 28); self.spin_fs.setValue(16)
         sgl.addLayout(_labeled('Font size', self.spin_fs))
 
         sgl.addWidget(_sep())
@@ -1589,6 +1703,12 @@ class ControlPanel(QScrollArea):
         self.chk_legend = QCheckBox('Show legend')
         self.chk_legend.setChecked(True)
         lgll.addRow(self.chk_legend)
+        # PL only: order legend entries from highest peak (top) to lowest (bottom),
+        # independent of plot/gradient order. When off, legend follows add order.
+        self.chk_legend_peak_order = QCheckBox('Order legend by peak (high→low)')
+        self.chk_legend_peak_order.setChecked(True)
+        self.chk_legend_peak_order.toggled.connect(self.live_update_requested)
+        lgll.addRow(self.chk_legend_peak_order)
         self.combo_legend_loc = QComboBox()
         self.combo_legend_loc.addItems([
             'best', 'upper right', 'upper left',
@@ -1625,7 +1745,7 @@ class ControlPanel(QScrollArea):
         lgll.addRow('Edge / w', _edge_w)
         self.spin_legend_fs = FlatDoubleSpinBox()
         self.spin_legend_fs.setRange(4.0, 40.0); self.spin_legend_fs.setSingleStep(1.0)
-        self.spin_legend_fs.setDecimals(1); self.spin_legend_fs.setValue(11.0)
+        self.spin_legend_fs.setDecimals(1); self.spin_legend_fs.setValue(16.0)
         lgll.addRow('Font size', self.spin_legend_fs)
 
         # ── Plot Box (axis box, tick-label padding, manual geometry, snap)
@@ -1678,7 +1798,7 @@ class ControlPanel(QScrollArea):
         self.g_pl = QGroupBox('PL Options')
         plgl = QVBoxLayout(self.g_pl)
         plgl.setSpacing(9)
-        self.chk_pl_baseline = QCheckBox('Subtract first point baseline')
+        self.chk_pl_baseline = QCheckBox('Baseline subtract')
         self.chk_pl_baseline.setChecked(True)
         pl_note = QLabel('Matches the original PL MATLAB workflow: y = y - y(1).')
         pl_note.setObjectName('hint')
@@ -1962,6 +2082,7 @@ class ControlPanel(QScrollArea):
             'legend_edge_color': self.color_legend_edge.hex(),
             'legend_edge_width': self.spin_legend_edge_w.value(),
             'legend_fontsize': self.spin_legend_fs.value(),
+            'legend_peak_order': self.chk_legend_peak_order.isChecked(),
             'pl_baseline_correct': self.chk_pl_baseline.isChecked(),
             'xrd_d_spacing': self.chk_d.isChecked(),
             'xrd_lambda': self.spin_lam.value(),
@@ -2536,6 +2657,8 @@ def _apply_y_notation(ax, s: dict):
         fmt.set_scientific(True)
         fmt.set_powerlimits((-3, 3))
         ax.yaxis.set_major_formatter(fmt)
+        # Keep the exponent label the same size as the axis numbers.
+        ax.yaxis.get_offset_text().set_fontsize(s.get('fontsize', 12))
     elif mode.startswith('Engineering'):
         def _k_fmt(val, _pos):
             if abs(val) >= 1000:
@@ -2574,6 +2697,11 @@ def _style_ax(ax, is_left: bool, xlabel: str, ylabel: str, s: dict):
                    length=length, width=width, labelsize=fontsize, colors='black',
                    left=show_y, right=show_right,
                    labelleft=(show_y and is_left), labelright=False, pad=y_tick_pad)
+
+    # The ×10^n exponent (offset text) doesn't inherit labelsize — match it
+    # to the axis-number font so scientific notation stays visually consistent.
+    ax.xaxis.get_offset_text().set_fontsize(fontsize)
+    ax.yaxis.get_offset_text().set_fontsize(fontsize)
 
     if s.get('minor_ticks', False):
         ax.minorticks_on()
@@ -2733,18 +2861,27 @@ def _plot_pl(axes: list, s: dict) -> int:
         traces, failed = _load_traces(panel)
         total_failed += failed
         corrected = []
-        for x, y, tr in traces:
+        for add_idx, (x, y, tr) in enumerate(traces):
             yc = _pl_trace_y(y, baseline_correct)
-            corrected.append((x, yc, float(np.max(yc)), tr))
+            corrected.append((x, yc, float(np.max(yc)), tr, add_idx))
+        # Plot order stays highest-peak-first so the gradient + z-order are unchanged.
         corrected.sort(key=lambda t: t[2], reverse=True)
 
         use_grad = panel.get('use_gradient', True)
         colors = make_gradient(*panel['gradient'], len(corrected)) if use_grad else None
-        hs, ls = [], []
-        for k, (x, y, _, tr) in enumerate(corrected):
+        entries = []  # (peak, add_idx, handle, label) for legend ordering
+        for k, (x, y, peak, tr, add_idx) in enumerate(corrected):
             color, lw, lstyle = _trace_visual(tr, colors, k, use_grad, s['linewidth'])
             ln, = ax.plot(x, y, linewidth=lw, color=color, linestyle=lstyle)
-            hs.append(ln); ls.append(tr['display_name'])
+            entries.append((peak, add_idx, ln, tr['display_name']))
+
+        # Legend order is independent of plot order: by peak (high→low) or add order.
+        if s.get('legend_peak_order', True):
+            legend_order = sorted(entries, key=lambda e: e[0], reverse=True)
+        else:
+            legend_order = sorted(entries, key=lambda e: e[1])
+        hs = [e[2] for e in legend_order]
+        ls = [e[3] for e in legend_order]
 
         ylabel = 'Baseline-corrected PL' if baseline_correct else 'PL intensity'
         _style_ax(ax, i == 0, 'Wavelength λ (nm)', ylabel, s)
@@ -3207,7 +3344,10 @@ class MainWindow(QMainWindow):
         undo_sc = QShortcut(QKeySequence.StandardKey.Undo, self)
         undo_sc.activated.connect(self.editor.undo_stack.undo)
 
+        self._has_plotted = False
         self.controls.plot_requested.connect(self._do_plot)
+        self.controls.live_update_requested.connect(self._auto_replot)
+        self.header.plot_requested.connect(self._do_plot)
         self.header.mode_changed.connect(self._on_mode_change)
         self.header.theme_toggled.connect(self._on_theme_toggle)
         self.controls.spin_fw.valueChanged.connect(self._mark_canvas_size_pending)
@@ -3278,21 +3418,29 @@ class MainWindow(QMainWindow):
             self.controls.chk_snap.isChecked(),
             self.controls.spin_snap_step.value())
 
-    def _do_plot(self):
+    def _auto_replot(self):
+        """Live-refresh the figure after a trace/legend change — but only once a
+        plot already exists, and without popping the 'No Data' / error dialogs."""
+        if self._has_plotted:
+            self._do_plot(silent=True)
+
+    def _do_plot(self, silent: bool = False):
         s = self.controls.settings()
         if s['plot_type'] == 'iv':
             problem = validate_iv_sets(s.get('iv_sets', []))
             if problem:
-                QMessageBox.information(self, 'Missing IV Data', problem)
+                if not silent:
+                    QMessageBox.information(self, 'Missing IV Data', problem)
                 return
         else:
             has_data = any(len(p['traces']) > 0 for p in s['panel_data'])
             has_xrd_refs = s['plot_type'] == 'xrd' and len(s['xrd_ref_paths']) > 0
             if not has_data and not has_xrd_refs:
-                QMessageBox.information(
-                    self, 'No Data',
-                    'Add at least one file to a panel, then click Plot.'
-                )
+                if not silent:
+                    QMessageBox.information(
+                        self, 'No Data',
+                        'Add at least one file to a panel, then click Plot.'
+                    )
                 return
         self.statusbar.show_message('Plotting…')
         self.canvas.set_fig_size(s['fig_width'] / 100, s['fig_height'] / 100)
@@ -3302,9 +3450,11 @@ class MainWindow(QMainWindow):
         try:
             msg = do_plot(self.canvas.get_figure(), s)
             self.editor.refresh()
+            self._has_plotted = True
             self.statusbar.show_message(msg + '   ·   Double-click figure text to edit · drag to reposition.')
         except Exception as e:
-            QMessageBox.critical(self, 'Plot Error', str(e))
+            if not silent:
+                QMessageBox.critical(self, 'Plot Error', str(e))
             self.statusbar.show_message(f'Error: {e}')
         finally:
             QApplication.restoreOverrideCursor()

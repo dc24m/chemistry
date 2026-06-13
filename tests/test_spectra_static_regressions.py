@@ -73,7 +73,7 @@ class SpectraStaticRegressionTest(unittest.TestCase):
 
     def test_plotting_shows_wait_cursor_and_flushes_ui_events(self):
         source = SOURCE.read_text(encoding="utf-8")
-        method = source.split("    def _do_plot(self):", 1)[1].split("\n\n# ── Entry point", 1)[0]
+        method = source.split("    def _do_plot(self, silent: bool = False):", 1)[1].split("\n\n# ── Entry point", 1)[0]
 
         self.assertIn("QApplication.setOverrideCursor", method)
         self.assertIn("QApplication.restoreOverrideCursor", method)
