@@ -2719,6 +2719,70 @@ def create_loading_screen() -> QSplashScreen:
     return splash
 
 
+class LayersPanel(QWidget):
+    """Read-only reflection of the traces in the current plot settings."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("layersPanel")
+        self._rows = []
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(4)
+        self.table = QTableWidget(0, 3)
+        self.table.setObjectName("layersTable")
+        self.table.setHorizontalHeaderLabels(["", "Trace", "Vis"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        lay.addWidget(self.table)
+        empty = QLabel("No traces yet — add data and Plot.")
+        empty.setObjectName("hint")
+        lay.addWidget(empty)
+        self._empty = empty
+
+    def set_rows(self, rows: list):
+        self._rows = list(rows)
+        self.table.setRowCount(len(self._rows))
+        for i, r in enumerate(self._rows):
+            swatch = QTableWidgetItem("")
+            swatch.setBackground(QColor(r.get("color", "#000000")))
+            self.table.setItem(i, 0, swatch)
+            self.table.setItem(i, 1, QTableWidgetItem(str(r.get("label", f"Trace {i+1}"))))
+            self.table.setItem(i, 2, QTableWidgetItem("●" if r.get("visible", True) else "○"))
+        self._empty.setVisible(len(self._rows) == 0)
+
+    def row_count(self) -> int:
+        return self.table.rowCount()
+
+    def label_at(self, i: int) -> str:
+        item = self.table.item(i, 1)
+        return item.text() if item else ""
+
+
+class LogPanel(QWidget):
+    """Append-only message console echoing status-bar messages."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("logPanel")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(0)
+        self.view = QPlainTextEdit()
+        self.view.setObjectName("logView")
+        self.view.setReadOnly(True)
+        lay.addWidget(self.view)
+
+    def append(self, msg: str):
+        self.view.appendPlainText(msg)
+
+    def text(self) -> str:
+        return self.view.toPlainText()
+
+
 class BottomStatusBar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2810,9 +2874,27 @@ class MainWindow(QMainWindow):
         self.dock_style.setWidget(style_scroll)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.dock_style)
 
+        # ── Right dock: Layers (trace manager reflection) ───────────────────
+        self.layers_dock = LayersPanel()
+        self.dock_layers = QDockWidget("Layers", self)
+        self.dock_layers.setObjectName("dock_layers")
+        self.dock_layers.setWidget(self.layers_dock)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_layers)
+
+        # ── Log dock: tabbed with Plot Style at the bottom ──────────────────
+        self.log_dock = LogPanel()
+        self.dock_log = QDockWidget("Log", self)
+        self.dock_log.setObjectName("dock_log")
+        self.dock_log.setWidget(self.log_dock)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.dock_log)
+        self.tabifyDockWidget(self.dock_style, self.dock_log)
+        self.dock_style.raise_()
+
         # View-menu dock toggles (inserted before the Dark Mode action)
         self.m_view.insertAction(self.act_dark, self.dock_build.toggleViewAction())
         self.m_view.insertAction(self.act_dark, self.dock_style.toggleViewAction())
+        self.m_view.insertAction(self.act_dark, self.dock_layers.toggleViewAction())
+        self.m_view.insertAction(self.act_dark, self.dock_log.toggleViewAction())
         self.m_view.insertSeparator(self.act_dark)
 
         self.resizeDocks([self.dock_build], [360], Qt.Orientation.Horizontal)
@@ -2943,6 +3025,8 @@ class MainWindow(QMainWindow):
 
     def _status_message(self, msg: str):
         self.statusBar().showMessage(msg)
+        if getattr(self, "log_dock", None) is not None:
+            self.log_dock.append(msg)
 
     def _status_ready(self, ok: bool):
         self._sb_ready.setText("● Ready" if ok else "● Busy")
@@ -3039,6 +3123,19 @@ class MainWindow(QMainWindow):
             self.editor.refresh()
             self._has_plotted = True
             self._status_message(msg + '   ·   Double-click figure text to edit · drag to reposition.')
+            try:
+                cfg = self.controls.settings()
+                rows = []
+                for panel in cfg.get("panel_data", []):
+                    for tr in panel.get("traces", []):
+                        rows.append({
+                            "label": tr.get("display_name", tr.get("name", "")),
+                            "color": tr.get("color", "#000000"),
+                            "visible": tr.get("visible", True),
+                        })
+                self.layers_dock.set_rows(rows)
+            except Exception:
+                pass  # Layers is a reflection; never let it break plotting.
         except Exception as e:
             if not silent:
                 QMessageBox.critical(self, 'Plot Error', str(e))
