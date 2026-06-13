@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "spectra_app.py"
+THEME = ROOT / "spectra_theme.py"
 REQUIREMENTS = ROOT / "requirements_spectra.txt"
 
 
@@ -91,8 +92,10 @@ class SpectraStaticRegressionTest(unittest.TestCase):
 
     def test_iv_curve_mode_has_dedicated_dataset_ui(self):
         source = SOURCE.read_text(encoding="utf-8")
+        # MODES definition moved to spectra_theme; search both files
+        combined = source + THEME.read_text(encoding="utf-8")
 
-        self.assertIn("'label': 'IV curve'", source)
+        self.assertIn("'label': 'IV curve'", combined)
         self.assertIn("class IVDataSetWidget", source)
         self.assertIn("self.spin_iv_sets", source)
         self.assertIn("'iv_sets'", source)
@@ -117,7 +120,8 @@ class SpectraStaticRegressionTest(unittest.TestCase):
         self.assertNotIn("self.controls.spin_fh.valueChanged.connect(self._update_canvas_size)", source)
 
     def test_selected_tabs_use_full_accent_fill(self):
-        source = SOURCE.read_text(encoding="utf-8")
+        # QSS rules moved to spectra_theme; search both files
+        source = SOURCE.read_text(encoding="utf-8") + THEME.read_text(encoding="utf-8")
 
         self.assertIn("QPushButton#headerTab:checked", source)
         self.assertIn("QTabBar::tab:selected", source)
