@@ -44,8 +44,9 @@ except ModuleNotFoundError as exc:
         "  python -m pip install -r requirements_spectra.txt"
     ) from exc
 
+import spectra_theme
 from spectra_theme import (
-    MODES, MODE_BY_KEY, darken, add_shadow, build_style,
+    MODES, MODE_BY_KEY, darken, add_shadow, build_style, s, init_ui_scale,
 )
 
 matplotlib.rcParams.update({
@@ -324,8 +325,8 @@ class ColorButton(QPushButton):
         self.setStyleSheet(
             f'QPushButton#colorpick {{ background:{self._hex}; color:{txt}; '
             f'border:1px solid rgba(0,0,0,0.18); border-radius:6px; '
-            f'min-height:26px; max-height:26px; padding:3px 8px; '
-            f'font-size:12px; font-weight:700; }}'
+            f'min-height:{s(26)}px; max-height:{s(26)}px; padding:{s(3)}px {s(8)}px; '
+            f'font-size:{s(12)}px; font-weight:700; }}'
         )
         self.setText(self._hex.upper())
 
@@ -362,18 +363,18 @@ class FigureTabBar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('figureTabBar')
-        self.setFixedHeight(36)
+        self.setFixedHeight(s(36))
         self._layout = QHBoxLayout(self)
-        self._layout.setContentsMargins(8, 4, 8, 4)
-        self._layout.setSpacing(4)
+        self._layout.setContentsMargins(s(8), s(4), s(8), s(4))
+        self._layout.setSpacing(s(4))
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._slots: list[tuple[QPushButton, QPushButton]] = []  # (tab_btn, close_btn)
 
         self._add_btn = QPushButton('+')
         self._add_btn.setObjectName('figureAddBtn')
-        self._add_btn.setFixedHeight(26)
-        self._add_btn.setFixedWidth(32)
+        self._add_btn.setFixedHeight(s(26))
+        self._add_btn.setFixedWidth(s(32))
         self._add_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._add_btn.clicked.connect(self.figure_add_requested)
         self._layout.addWidget(self._add_btn)
@@ -384,20 +385,20 @@ class FigureTabBar(QWidget):
         slot = QWidget()
         slot_lay = QHBoxLayout(slot)
         slot_lay.setContentsMargins(0, 0, 0, 0)
-        slot_lay.setSpacing(2)
+        slot_lay.setSpacing(s(2))
 
         tab_btn = QPushButton(label)
         tab_btn.setObjectName('figureTab')
         tab_btn.setCheckable(True)
-        tab_btn.setFixedHeight(26)
+        tab_btn.setFixedHeight(s(26))
         tab_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         tab_btn.clicked.connect(lambda _, i=idx: self.figure_selected.emit(i))
         self._group.addButton(tab_btn)
 
         close_btn = QPushButton('×')
         close_btn.setObjectName('figureTabClose')
-        close_btn.setFixedHeight(20)
-        close_btn.setFixedWidth(18)
+        close_btn.setFixedHeight(s(20))
+        close_btn.setFixedWidth(s(18))
         close_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         close_btn.clicked.connect(lambda _, i=idx: self.figure_close_requested.emit(i))
         close_btn.setVisible(False)  # hidden until >1 tab
@@ -453,7 +454,7 @@ class ModeTabBar(QWidget):
         super().__init__(parent)
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
+        row.setSpacing(s(6))
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self.buttons = {}
@@ -465,10 +466,10 @@ class ModeTabBar(QWidget):
             b.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
             # Use the larger of the spec floor and the measured text width so the
             # label is guaranteed room with padding to spare.
-            floor = self._MIN_W.get(m['key'], 130)
-            measured = b.fontMetrics().horizontalAdvance(m['label']) + 34
+            floor = s(self._MIN_W.get(m['key'], 130))
+            measured = b.fontMetrics().horizontalAdvance(m['label']) + s(34)
             b.setMinimumWidth(max(floor, measured))
-            b.setMinimumHeight(34)
+            b.setMinimumHeight(s(34))
             b.clicked.connect(lambda _, k=m['key']: self._select(k))
             self._group.addButton(b)
             self.buttons[m['key']] = b
@@ -505,10 +506,10 @@ class TopHeader(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('topHeader')
-        self.setFixedHeight(80)
+        self.setFixedHeight(s(80))
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(14, 0, 14, 0)
+        lay.setContentsMargins(s(14), 0, s(14), 0)
         lay.setSpacing(0)
 
         # ── Logo image (assets/logo.png, optional)
@@ -518,12 +519,12 @@ class TopHeader(QWidget):
             logo_lbl = QLabel()
             logo_lbl.setObjectName('logoImg')
             pix = QPixmap(logo_path)
-            logo_lbl.setPixmap(pix.scaled(48, 48,
+            logo_lbl.setPixmap(pix.scaled(s(48), s(48),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation))
-            logo_lbl.setFixedSize(48, 48)
+            logo_lbl.setFixedSize(s(48), s(48))
             lay.addWidget(logo_lbl)
-            lay.addSpacing(11)
+            lay.addSpacing(s(11))
 
         # ── Brand block: SPECTRA + plot title over subtitle
         brand = QWidget()
@@ -544,7 +545,7 @@ class TopHeader(QWidget):
         bcol.addWidget(subtitle)
         bcol.addStretch()
         lay.addWidget(brand)
-        lay.addSpacing(22)
+        lay.addSpacing(s(22))
 
         self.mode_tabs = ModeTabBar()
         self.mode_tabs.mode_changed.connect(self.mode_changed)
@@ -554,26 +555,26 @@ class TopHeader(QWidget):
 
         self.btn_plot = QPushButton('PLOT')
         self.btn_plot.setObjectName('headerPlotBtn')
-        self.btn_plot.setFixedHeight(42)
-        self.btn_plot.setMinimumWidth(96)
+        self.btn_plot.setFixedHeight(s(42))
+        self.btn_plot.setMinimumWidth(s(96))
         self.btn_plot.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_plot.clicked.connect(self.plot_requested)
         lay.addWidget(self.btn_plot)
-        lay.addSpacing(8)
+        lay.addSpacing(s(8))
 
         self.btn_theme = QPushButton('Dark')
         self.btn_theme.setObjectName('themeToggle')
         self.btn_theme.setCheckable(True)
-        self.btn_theme.setFixedSize(62, 36)
+        self.btn_theme.setFixedSize(s(62), s(36))
         self.btn_theme.toggled.connect(self.theme_toggled)
         lay.addWidget(self.btn_theme)
 
     def _set_title_colors(self, ink: str, muted: str):
         ff = self._TITLE_FF
         self._title_lbl.setText(
-            f'<span style="font-family:{ff};font-size:30px;font-weight:800;'
+            f'<span style="font-family:{ff};font-size:{s(30)}px;font-weight:800;'
             f'letter-spacing:0;color:{ink};">SPECTRA</span>'
-            f'<span style="font-family:{ff};font-size:30px;font-weight:300;'
+            f'<span style="font-family:{ff};font-size:{s(30)}px;font-weight:300;'
             f'color:{muted};">plot</span>'
         )
 
@@ -593,10 +594,10 @@ class TraceEditDialog(QDialog):
         super().__init__(parent)
         self.trace = trace
         self.setWindowTitle('Edit Trace')
-        self.setMinimumWidth(340)
+        self.setMinimumWidth(s(340))
 
         form = QFormLayout(self)
-        form.setSpacing(10)
+        form.setSpacing(s(10))
 
         self.edit_name = QLineEdit(trace.get('display_name', ''))
         form.addRow('Trace name', self.edit_name)
@@ -675,14 +676,14 @@ class _TraceRow(QWidget):
         self._on_change = on_change
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(6, 0, 2, 0)
-        lay.setSpacing(4)
+        lay.setContentsMargins(s(6), 0, s(2), 0)
+        lay.setSpacing(s(4))
 
         self.lbl = QLabel()
         self.lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         self.btn = QToolButton()
-        self.btn.setFixedSize(26, 22)
+        self.btn.setFixedSize(s(26), s(22))
         self.btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn.clicked.connect(self._toggle)
 
@@ -702,7 +703,7 @@ class _TraceRow(QWidget):
         self.lbl.setStyleSheet('' if visible else 'color: #A8A8A8;')
         ink = '#444444' if visible else '#C0C0C0'
         self.btn.setStyleSheet(
-            f'QToolButton {{ border: none; background: transparent; font-size: 14px; '
+            f'QToolButton {{ border: none; background: transparent; font-size: {s(14)}px; '
             f'color: {ink}; padding: 0px; }}'
             f'QToolButton:hover {{ background: rgba(0,0,0,0.08); border-radius: 3px; }}'
         )
@@ -722,18 +723,18 @@ class PanelFileWidget(QWidget):
         self.traces: list[dict] = []
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 10, 10, 10)
-        lay.setSpacing(8)
+        lay.setContentsMargins(s(10), s(10), s(10), s(10))
+        lay.setSpacing(s(8))
 
         self.lst = QListWidget()
         self.lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.lst.setMinimumHeight(75)
-        self.lst.setMaximumHeight(220)
+        self.lst.setMinimumHeight(s(75))
+        self.lst.setMaximumHeight(s(220))
         self.lst.itemDoubleClicked.connect(self._edit_double)
         lay.addWidget(self.lst)
 
         br = QHBoxLayout()
-        br.setSpacing(6)
+        br.setSpacing(s(6))
         self.btn_add = QPushButton('+ Add Files')
         self.btn_add.setObjectName('secondary')
         self.btn_rem = QPushButton('Remove')
@@ -762,9 +763,9 @@ class PanelFileWidget(QWidget):
             ('c_bot', 'Bottom color', '#000000'),
         ):
             row = QHBoxLayout()
-            row.setSpacing(8)
+            row.setSpacing(s(8))
             lbl = QLabel(label_text)
-            lbl.setFixedWidth(78)
+            lbl.setFixedWidth(s(78))
             lbl.setObjectName('fieldlbl')
             btn = ColorButton(default)
             btn.color_changed.connect(lambda _: self.changed.emit())
@@ -857,13 +858,13 @@ class IVDataSetWidget(QWidget):
         self.pos_path = ''
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 8, 4, 8)
-        lay.setSpacing(10)
+        lay.setContentsMargins(s(4), s(8), s(4), s(8))
+        lay.setSpacing(s(10))
 
         meta = QGroupBox('Set identity')
         meta_lay = QFormLayout(meta)
-        meta_lay.setContentsMargins(8, 14, 8, 8)
-        meta_lay.setVerticalSpacing(8)
+        meta_lay.setContentsMargins(s(8), s(14), s(8), s(8))
+        meta_lay.setVerticalSpacing(s(8))
         self.edit_name = QLineEdit(f'Set {index + 1}')
         self.edit_name.setPlaceholderText(f'Set {index + 1}')
         self.color = ColorButton(IV_SET_COLORS[index % len(IV_SET_COLORS)])
@@ -893,28 +894,28 @@ class IVDataSetWidget(QWidget):
 
     def _sweep_row(self, title: str, browse_handler, clear_handler):
         row = QVBoxLayout()
-        row.setSpacing(6)
+        row.setSpacing(s(6))
         title_label = QLabel(title)
         title_label.setObjectName('fieldlbl')
         path_label = QLabel('No CSV selected')
         path_label.setObjectName('hint')
-        path_label.setMinimumWidth(120)
+        path_label.setMinimumWidth(s(120))
         path_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         btn_browse = QPushButton('Browse')
         btn_browse.setObjectName('secondary')
         btn_clear = QPushButton('X')
         btn_clear.setObjectName('danger')
-        btn_clear.setFixedWidth(34)
+        btn_clear.setFixedWidth(s(34))
         btn_browse.clicked.connect(browse_handler)
         btn_clear.clicked.connect(clear_handler)
 
         file_row = QHBoxLayout()
-        file_row.setSpacing(6)
+        file_row.setSpacing(s(6))
         file_row.addWidget(title_label)
         file_row.addWidget(path_label, 1)
 
         action_row = QHBoxLayout()
-        action_row.setSpacing(6)
+        action_row.setSpacing(s(6))
         action_row.addStretch(1)
         action_row.addWidget(btn_browse)
         action_row.addWidget(btn_clear)
@@ -964,9 +965,9 @@ class IVDataSetWidget(QWidget):
 
 def _labeled(label_text: str, widget: QWidget, lw: int = 74) -> QHBoxLayout:
     r = QHBoxLayout()
-    r.setSpacing(8)
+    r.setSpacing(s(8))
     lbl = QLabel(label_text)
-    lbl.setFixedWidth(lw)
+    lbl.setFixedWidth(s(lw))
     lbl.setObjectName('fieldlbl')
     r.addWidget(lbl)
     r.addWidget(widget)
@@ -975,8 +976,8 @@ def _labeled(label_text: str, widget: QWidget, lw: int = 74) -> QHBoxLayout:
 
 def _sep() -> QLabel:
     sep = QLabel()
-    sep.setFixedHeight(1)
-    sep.setStyleSheet('background: #E2E8F0; margin: 4px 0;')
+    sep.setFixedHeight(s(1))
+    sep.setStyleSheet(f'background: #E2E8F0; margin: {s(4)}px 0;')
     return sep
 
 
@@ -991,7 +992,7 @@ class ControlPanel(QScrollArea):
         self.setObjectName('sidebar')
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setFixedWidth(368)
+        self.setFixedWidth(s(368))
 
         root = QWidget()
         root.setObjectName('sidebar')
@@ -1000,15 +1001,15 @@ class ControlPanel(QScrollArea):
         self.setWidget(root)
 
         lay = QVBoxLayout(root)
-        lay.setContentsMargins(8, 8, 8, 12)
-        lay.setSpacing(6)
+        lay.setContentsMargins(s(8), s(8), s(8), s(12))
+        lay.setSpacing(s(6))
 
         self._current_mode = MODES[0]['key']
 
         # ── Plot panels
         self.g_plot = QGroupBox('Plot')
         gl = QVBoxLayout(self.g_plot)
-        gl.setSpacing(9)
+        gl.setSpacing(s(9))
         self.spin_panels = FlatSpinBox()
         self.spin_panels.setRange(1, 5)
         self.spin_panels.setValue(1)
@@ -1026,8 +1027,8 @@ class ControlPanel(QScrollArea):
         # ── Data tabs
         self.g_data = QGroupBox('Data')
         dgl = QVBoxLayout(self.g_data)
-        dgl.setContentsMargins(8, 16, 8, 8)
-        dgl.setSpacing(6)
+        dgl.setContentsMargins(s(8), s(16), s(8), s(8))
+        dgl.setSpacing(s(6))
         hint = QLabel('Add .csv / .tsv / .xy files per panel.')
         hint.setObjectName('hint')
         hint.setWordWrap(True)
@@ -1046,8 +1047,8 @@ class ControlPanel(QScrollArea):
 
         self.g_iv = QGroupBox('IV Curve Data')
         iv_lay = QVBoxLayout(self.g_iv)
-        iv_lay.setContentsMargins(4, 14, 4, 8)
-        iv_lay.setSpacing(8)
+        iv_lay.setContentsMargins(s(4), s(14), s(4), s(8))
+        iv_lay.setSpacing(s(8))
         self.spin_iv_sets = FlatSpinBox()
         self.spin_iv_sets.setRange(1, 10)
         self.spin_iv_sets.setValue(3)
@@ -1072,19 +1073,19 @@ class ControlPanel(QScrollArea):
         # ── Axes
         self.g_axes = QGroupBox('Axes')
         agl = QVBoxLayout(self.g_axes)
-        agl.setSpacing(9)
+        agl.setSpacing(s(9))
 
-        xrow = QHBoxLayout(); xrow.setSpacing(5)
-        xl = QLabel('X range'); xl.setFixedWidth(52); xl.setObjectName('fieldlbl')
+        xrow = QHBoxLayout(); xrow.setSpacing(s(5))
+        xl = QLabel('X range'); xl.setFixedWidth(s(52)); xl.setObjectName('fieldlbl')
         self.spin_xmin = FlatDoubleSpinBox()
         self.spin_xmax = FlatDoubleSpinBox()
-        for s in (self.spin_xmin, self.spin_xmax):
-            s.setRange(-9999, 99999); s.setDecimals(1)
-            s.setMinimumWidth(56)
-            s.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for sb in (self.spin_xmin, self.spin_xmax):
+            sb.setRange(-9999, 99999); sb.setDecimals(1)
+            sb.setMinimumWidth(s(56))
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.spin_xmin.setValue(400); self.spin_xmax.setValue(800)
         dash = QLabel('–'); dash.setStyleSheet('color:#8a93a0;')
-        dash.setFixedWidth(12); dash.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dash.setFixedWidth(s(12)); dash.setAlignment(Qt.AlignmentFlag.AlignCenter)
         xrow.addWidget(xl); xrow.addWidget(self.spin_xmin, 1)
         xrow.addWidget(dash); xrow.addWidget(self.spin_xmax, 1)
         agl.addLayout(xrow)
@@ -1108,17 +1109,17 @@ class ControlPanel(QScrollArea):
         self.chk_pauto_x = QCheckBox('Auto X (this panel)')
         self.chk_pauto_x.toggled.connect(self._toggle_panel_xlim)
         agl.addWidget(self.chk_pauto_x)
-        pxrow = QHBoxLayout(); pxrow.setSpacing(5)
-        pxl = QLabel('X range'); pxl.setFixedWidth(52); pxl.setObjectName('fieldlbl')
+        pxrow = QHBoxLayout(); pxrow.setSpacing(s(5))
+        pxl = QLabel('X range'); pxl.setFixedWidth(s(52)); pxl.setObjectName('fieldlbl')
         self.spin_pxmin = FlatDoubleSpinBox()
         self.spin_pxmax = FlatDoubleSpinBox()
-        for s in (self.spin_pxmin, self.spin_pxmax):
-            s.setRange(-9999, 99999); s.setDecimals(1)
-            s.setMinimumWidth(56)
-            s.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for sb in (self.spin_pxmin, self.spin_pxmax):
+            sb.setRange(-9999, 99999); sb.setDecimals(1)
+            sb.setMinimumWidth(s(56))
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.spin_pxmin.setValue(400); self.spin_pxmax.setValue(800)
         pdash = QLabel('–'); pdash.setStyleSheet('color:#8a93a0;')
-        pdash.setFixedWidth(12); pdash.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pdash.setFixedWidth(s(12)); pdash.setAlignment(Qt.AlignmentFlag.AlignCenter)
         pxrow.addWidget(pxl); pxrow.addWidget(self.spin_pxmin, 1)
         pxrow.addWidget(pdash); pxrow.addWidget(self.spin_pxmax, 1)
         agl.addLayout(pxrow)
@@ -1129,17 +1130,17 @@ class ControlPanel(QScrollArea):
 
         agl.addWidget(_sep())
 
-        yrow = QHBoxLayout(); yrow.setSpacing(5)
-        yl = QLabel('Y range'); yl.setFixedWidth(52); yl.setObjectName('fieldlbl')
+        yrow = QHBoxLayout(); yrow.setSpacing(s(5))
+        yl = QLabel('Y range'); yl.setFixedWidth(s(52)); yl.setObjectName('fieldlbl')
         self.spin_ymin = FlatDoubleSpinBox()
         self.spin_ymax = FlatDoubleSpinBox()
-        for s in (self.spin_ymin, self.spin_ymax):
-            s.setRange(-9999999, 9999999); s.setDecimals(2)
-            s.setMinimumWidth(56)
-            s.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for sb in (self.spin_ymin, self.spin_ymax):
+            sb.setRange(-9999999, 9999999); sb.setDecimals(2)
+            sb.setMinimumWidth(s(56))
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.spin_ymin.setValue(0); self.spin_ymax.setValue(1)
         dash2 = QLabel('–'); dash2.setStyleSheet('color:#8a93a0;')
-        dash2.setFixedWidth(12); dash2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dash2.setFixedWidth(s(12)); dash2.setAlignment(Qt.AlignmentFlag.AlignCenter)
         yrow.addWidget(yl); yrow.addWidget(self.spin_ymin, 1)
         yrow.addWidget(dash2); yrow.addWidget(self.spin_ymax, 1)
         agl.addLayout(yrow)
@@ -1160,7 +1161,7 @@ class ControlPanel(QScrollArea):
         # ── Labels
         g4 = QGroupBox('Labels')
         lgl = QVBoxLayout(g4)
-        lgl.setSpacing(7)
+        lgl.setSpacing(s(7))
         self.chk_main_title = QCheckBox('Main title')
         self.edit_main_title = QLineEdit()
         self.edit_main_title.setPlaceholderText('Enter main title…')
@@ -1185,7 +1186,7 @@ class ControlPanel(QScrollArea):
         # ── Style
         g5 = QGroupBox('Style')
         sgl = QVBoxLayout(g5)
-        sgl.setSpacing(9)
+        sgl.setSpacing(s(9))
 
         self.spin_lw = FlatDoubleSpinBox()
         self.spin_lw.setRange(0.5, 6.0); self.spin_lw.setSingleStep(0.5); self.spin_lw.setValue(1.5)
@@ -1197,12 +1198,12 @@ class ControlPanel(QScrollArea):
 
         sgl.addWidget(_sep())
 
-        fw_row = QHBoxLayout(); fw_row.setSpacing(5)
-        fw_lbl = QLabel('Size (px)'); fw_lbl.setFixedWidth(52); fw_lbl.setObjectName('fieldlbl')
+        fw_row = QHBoxLayout(); fw_row.setSpacing(s(5))
+        fw_lbl = QLabel('Size (px)'); fw_lbl.setFixedWidth(s(52)); fw_lbl.setObjectName('fieldlbl')
         self.spin_fw = FlatSpinBox()
         self.spin_fh = FlatSpinBox()
-        for s in (self.spin_fw, self.spin_fh):
-            s.setRange(100, 3000); s.setSingleStep(50); s.setMaximumWidth(78)
+        for sb in (self.spin_fw, self.spin_fh):
+            sb.setRange(100, 3000); sb.setSingleStep(50); sb.setMaximumWidth(s(78))
         self.spin_fw.setValue(800); self.spin_fh.setValue(500)
         fw_x = QLabel('×'); fw_x.setStyleSheet('color:#8a93a0;')
         fw_row.addWidget(fw_lbl)
@@ -1219,7 +1220,7 @@ class ControlPanel(QScrollArea):
         # ── Graph Appearance (figure font family)
         g_app = QGroupBox('Graph Appearance')
         appl = QVBoxLayout(g_app)
-        appl.setSpacing(4)
+        appl.setSpacing(s(4))
         self.combo_font = NoScrollComboBox()
         self.combo_font.addItems([
             'Arial', 'Helvetica', 'Times New Roman',
@@ -1242,8 +1243,8 @@ class ControlPanel(QScrollArea):
         # ── Ticks (MATLAB-style boxed axes by default)
         g_tick = QGroupBox('Ticks')
         tgl = QVBoxLayout(g_tick)
-        tgl.setSpacing(4)
-        tgl.setContentsMargins(8, 6, 8, 6)
+        tgl.setSpacing(s(4))
+        tgl.setContentsMargins(s(8), s(6), s(8), s(6))
         self.combo_tick_dir = QComboBox()
         self.combo_tick_dir.addItems(['in', 'out', 'inout'])
         self.combo_tick_dir.setCurrentText('in')
@@ -1269,8 +1270,8 @@ class ControlPanel(QScrollArea):
         # ── Number format (axis notation)
         g_num = QGroupBox('Axis Numbers')
         ngl = QVBoxLayout(g_num)
-        ngl.setSpacing(4)
-        ngl.setContentsMargins(8, 6, 8, 6)
+        ngl.setSpacing(s(4))
+        ngl.setContentsMargins(s(8), s(6), s(8), s(6))
         self.combo_ynot = QComboBox()
         self.combo_ynot.addItems(['Normal', 'Scientific notation', 'Engineering/K'])
         self.combo_ynot.currentTextChanged.connect(self._toggle_sci)
@@ -1290,14 +1291,14 @@ class ControlPanel(QScrollArea):
         self.spin_numpad = FlatSpinBox()
         self.spin_numpad.setRange(0, 30)
         self.spin_numpad.setValue(10)
-        self.spin_numpad.setFixedWidth(44)
+        self.spin_numpad.setFixedWidth(s(44))
         self.slider_numpad.valueChanged.connect(self.spin_numpad.setValue)
         self.spin_numpad.valueChanged.connect(self.slider_numpad.setValue)
         self.slider_numpad.valueChanged.connect(lambda _: self.plot_requested.emit())
         _dist_row = QHBoxLayout()
-        _dist_row.setSpacing(6)
+        _dist_row.setSpacing(s(6))
         _lbl_dist = QLabel('Distance')
-        _lbl_dist.setFixedWidth(70)
+        _lbl_dist.setFixedWidth(s(70))
         _lbl_dist.setObjectName('fieldlbl')
         _dist_row.addWidget(_lbl_dist)
         _dist_row.addWidget(self.slider_numpad, 1)
@@ -1308,8 +1309,8 @@ class ControlPanel(QScrollArea):
         # ── Legend (full customization; transparent background by default)
         g_legend = QGroupBox('Legend')
         lgll = QFormLayout(g_legend)
-        lgll.setVerticalSpacing(4)
-        lgll.setContentsMargins(8, 6, 8, 6)
+        lgll.setVerticalSpacing(s(4))
+        lgll.setContentsMargins(s(8), s(6), s(8), s(6))
         lgll.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.chk_legend = QCheckBox('Show legend')
         self.chk_legend.setChecked(True)
@@ -1335,8 +1336,8 @@ class ControlPanel(QScrollArea):
         self.spin_legend_alpha = FlatDoubleSpinBox()
         self.spin_legend_alpha.setRange(0.0, 1.0); self.spin_legend_alpha.setSingleStep(0.05)
         self.spin_legend_alpha.setDecimals(2); self.spin_legend_alpha.setValue(0.0)
-        self.spin_legend_alpha.setFixedWidth(56)
-        _bg_row = QHBoxLayout(); _bg_row.setSpacing(4)
+        self.spin_legend_alpha.setFixedWidth(s(56))
+        _bg_row = QHBoxLayout(); _bg_row.setSpacing(s(4))
         _bg_row.addWidget(self.color_legend_bg); _bg_row.addWidget(self.spin_legend_alpha)
         _bg_w = QWidget(); _bg_w.setLayout(_bg_row)
         lgll.addRow('BG / α', _bg_w)
@@ -1349,8 +1350,8 @@ class ControlPanel(QScrollArea):
         self.spin_legend_edge_w = FlatDoubleSpinBox()
         self.spin_legend_edge_w.setRange(0.0, 6.0); self.spin_legend_edge_w.setSingleStep(0.1)
         self.spin_legend_edge_w.setDecimals(1); self.spin_legend_edge_w.setValue(0.8)
-        self.spin_legend_edge_w.setFixedWidth(56)
-        _edge_row = QHBoxLayout(); _edge_row.setSpacing(4)
+        self.spin_legend_edge_w.setFixedWidth(s(56))
+        _edge_row = QHBoxLayout(); _edge_row.setSpacing(s(4))
         _edge_row.addWidget(self.color_legend_edge); _edge_row.addWidget(self.spin_legend_edge_w)
         _edge_w = QWidget(); _edge_w.setLayout(_edge_row)
         lgll.addRow('Edge / w', _edge_w)
@@ -1362,14 +1363,14 @@ class ControlPanel(QScrollArea):
         # ── Plot Box (axis box, tick-label padding, manual geometry, snap)
         g_box = QGroupBox('Plot Box')
         bgl = QFormLayout(g_box)
-        bgl.setVerticalSpacing(4)
-        bgl.setContentsMargins(8, 6, 8, 6)
+        bgl.setVerticalSpacing(s(4))
+        bgl.setContentsMargins(s(8), s(6), s(8), s(6))
         bgl.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.spin_box_lw = FlatDoubleSpinBox()
         self.spin_box_lw.setRange(0.2, 6.0); self.spin_box_lw.setSingleStep(0.1)
         self.spin_box_lw.setDecimals(1); self.spin_box_lw.setValue(2.0)
         self.color_box = ColorButton('#000000')
-        _box_row = QHBoxLayout(); _box_row.setSpacing(4)
+        _box_row = QHBoxLayout(); _box_row.setSpacing(s(4))
         _box_row.addWidget(self.color_box); _box_row.addWidget(self.spin_box_lw)
         _box_w = QWidget(); _box_w.setLayout(_box_row)
         bgl.addRow('Color / lw', _box_w)
@@ -1408,7 +1409,7 @@ class ControlPanel(QScrollArea):
         # ── PL options
         self.g_pl = QGroupBox('PL Options')
         plgl = QVBoxLayout(self.g_pl)
-        plgl.setSpacing(9)
+        plgl.setSpacing(s(9))
         self.chk_pl_baseline = QCheckBox('Baseline subtract')
         self.chk_pl_baseline.setChecked(True)
         pl_note = QLabel('Matches the original PL MATLAB workflow: y = y - y(1).')
@@ -1421,7 +1422,7 @@ class ControlPanel(QScrollArea):
         # ── XRD options
         self.g_xrd = QGroupBox('XRD Options')
         xgl = QVBoxLayout(self.g_xrd)
-        xgl.setSpacing(9)
+        xgl.setSpacing(s(9))
         self.chk_d = QCheckBox('Convert 2θ → d-spacing (Å)')
         xgl.addWidget(self.chk_d)
         self.spin_lam = FlatDoubleSpinBox()
@@ -1449,10 +1450,10 @@ class ControlPanel(QScrollArea):
         ref_lbl.setObjectName('fieldlbl')
         xgl.addWidget(ref_lbl)
         self.xrd_ref_list = QListWidget()
-        self.xrd_ref_list.setMaximumHeight(90)
+        self.xrd_ref_list.setMaximumHeight(s(90))
         self.xrd_ref_paths: list[str] = []
         xgl.addWidget(self.xrd_ref_list)
-        xrd_br = QHBoxLayout(); xrd_br.setSpacing(6)
+        xrd_br = QHBoxLayout(); xrd_br.setSpacing(s(6))
         self.btn_ref_add = QPushButton('+ Add Refs')
         self.btn_ref_add.setObjectName('secondary')
         self.btn_ref_rem = QPushButton('Remove')
@@ -1467,11 +1468,11 @@ class ControlPanel(QScrollArea):
         # ── Export
         g6 = QGroupBox('Export')
         egl = QVBoxLayout(g6)
-        egl.setSpacing(9)
+        egl.setSpacing(s(9))
         self.spin_dpi = FlatSpinBox()
         self.spin_dpi.setRange(72, 600); self.spin_dpi.setSingleStep(50); self.spin_dpi.setValue(300)
         egl.addLayout(_labeled('DPI', self.spin_dpi))
-        fmt_row = QHBoxLayout(); fmt_row.setSpacing(6)
+        fmt_row = QHBoxLayout(); fmt_row.setSpacing(s(6))
         for fmt in ('PNG', 'PDF', 'SVG'):
             b = QPushButton(fmt); b.setObjectName('secondary')
             b.clicked.connect(lambda checked, f=fmt.lower(): self._save(f))
@@ -1828,10 +1829,10 @@ class TextEditDialog(QDialog):
         super().__init__(parent)
         self.artist = artist
         self.setWindowTitle('Edit text')
-        self.setMinimumWidth(320)
+        self.setMinimumWidth(s(320))
 
         form = QFormLayout(self)
-        form.setSpacing(10)
+        form.setSpacing(s(10))
 
         self.edit = QLineEdit(artist.get_text())
         form.addRow('Text', self.edit)
@@ -1874,10 +1875,10 @@ class LegendEditDialog(QDialog):
         self.legend = legend
         frame = legend.get_frame()
         self.setWindowTitle('Edit legend')
-        self.setMinimumWidth(320)
+        self.setMinimumWidth(s(320))
 
         form = QFormLayout(self)
-        form.setSpacing(10)
+        form.setSpacing(s(10))
 
         self.edge = ColorButton(to_hex(frame.get_edgecolor()))
         form.addRow('Edge color', self.edge)
@@ -2130,7 +2131,7 @@ class PlotCanvas(QWidget):
         super().__init__(parent)
         self.setObjectName('canvasArea')
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 14, 14, 8)
+        lay.setContentsMargins(s(14), s(14), s(14), s(8))
         lay.setSpacing(0)
 
         self.card = QWidget()
@@ -2138,8 +2139,8 @@ class PlotCanvas(QWidget):
         self.card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         add_shadow(self.card, blur=32, y=10, alpha=28)
         card_lay = QVBoxLayout(self.card)
-        card_lay.setContentsMargins(10, 10, 10, 10)
-        card_lay.setSpacing(10)
+        card_lay.setContentsMargins(s(10), s(10), s(10), s(10))
+        card_lay.setSpacing(s(10))
 
         self.fig = Figure(facecolor='white', dpi=self.DISPLAY_DPI)
         self.canvas = FigureCanvasQTAgg(self.fig)
@@ -2153,7 +2154,7 @@ class PlotCanvas(QWidget):
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
         sep.setFrameShadow(QFrame.Shadow.Sunken)
-        sep.setFixedWidth(1)
+        sep.setFixedWidth(s(1))
         sep.setStyleSheet('background: #B8C5D3;')
         self.toolbar.addWidget(sep)
 
@@ -2181,7 +2182,7 @@ class PlotCanvas(QWidget):
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.VLine)
         sep2.setFrameShadow(QFrame.Shadow.Sunken)
-        sep2.setFixedWidth(1)
+        sep2.setFixedWidth(s(1))
         sep2.setStyleSheet('background: #B8C5D3;')
         self.toolbar.addWidget(sep2)
 
@@ -2218,7 +2219,7 @@ class PlotCanvas(QWidget):
         holder = QWidget()
         holder.setObjectName('canvasHolder')
         hv = QVBoxLayout(holder)
-        hv.setContentsMargins(20, 20, 20, 20)
+        hv.setContentsMargins(s(20), s(20), s(20), s(20))
         hv.addStretch()
         hrow = QHBoxLayout()
         hrow.addStretch()
@@ -2869,7 +2870,7 @@ def do_plot(fig: Figure, s: dict) -> str:
 # ── Main window ───────────────────────────────────────────────────────────────
 
 def create_loading_screen() -> QSplashScreen:
-    pixmap = QPixmap(440, 240)
+    pixmap = QPixmap(s(440), s(240))
     pixmap.fill(QColor('#FFFFFF'))
 
     splash = QSplashScreen(pixmap)
@@ -2878,8 +2879,8 @@ def create_loading_screen() -> QSplashScreen:
     splash.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
     layout = QVBoxLayout(splash)
-    layout.setContentsMargins(34, 30, 34, 28)
-    layout.setSpacing(10)
+    layout.setContentsMargins(s(34), s(30), s(34), s(28))
+    layout.setSpacing(s(10))
 
     title = QLabel('SPECTRAplot')
     title.setObjectName('loadingTitle')
@@ -2915,7 +2916,7 @@ class LogPanel(QWidget):
         super().__init__(parent)
         self.setObjectName("logPanel")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setContentsMargins(s(4), s(4), s(4), s(4))
         lay.setSpacing(0)
         self.view = QPlainTextEdit()
         self.view.setObjectName("logView")
@@ -2934,8 +2935,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('SPECTRAplot')
-        self.resize(1520, 900)
-        self.setMinimumSize(1100, 640)
+        self.resize(s(1520), s(900))
+        self.setMinimumSize(s(1100), s(640))
 
         self._current_mode = MODES[0]['key']
 
@@ -2975,14 +2976,14 @@ class MainWindow(QMainWindow):
         style_host = QWidget()
         style_host.setObjectName("plotStyleHost")
         style_lay = QVBoxLayout(style_host)
-        style_lay.setContentsMargins(8, 8, 8, 8)
-        style_lay.setSpacing(8)
+        style_lay.setContentsMargins(s(8), s(8), s(8), s(8))
+        style_lay.setSpacing(s(8))
 
         # ── Preset buttons at the top of the style dock ──────────────────────
         preset_row = QWidget()
         preset_lay = QHBoxLayout(preset_row)
         preset_lay.setContentsMargins(0, 0, 0, 0)
-        preset_lay.setSpacing(6)
+        preset_lay.setSpacing(s(6))
         btn_save_preset = QPushButton('Save Preset')
         btn_save_preset.setObjectName('presetBtn')
         btn_load_preset = QPushButton('Load Preset')
@@ -3007,7 +3008,7 @@ class MainWindow(QMainWindow):
         self.dock_style = QDockWidget("Plot Style", self)
         self.dock_style.setObjectName("dock_style")
         self.dock_style.setWidget(style_scroll)
-        self.dock_style.setMinimumWidth(360)
+        self.dock_style.setMinimumWidth(s(360))
         self.dock_style.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_style)
@@ -3099,9 +3100,9 @@ class MainWindow(QMainWindow):
         self._switch_figure(min(idx, len(self._figure_states) - 1))
 
     def _apply_dock_sizes(self):
-        self.resizeDocks([self.dock_build], [260], Qt.Orientation.Horizontal)
-        self.resizeDocks([self.dock_style], [360], Qt.Orientation.Horizontal)
-        self.resizeDocks([self.dock_log], [90], Qt.Orientation.Vertical)
+        self.resizeDocks([self.dock_build], [s(260)], Qt.Orientation.Horizontal)
+        self.resizeDocks([self.dock_style], [s(360)], Qt.Orientation.Horizontal)
+        self.resizeDocks([self.dock_log], [s(90)], Qt.Orientation.Vertical)
 
     def _build_chrome(self):
         self.act_plot = QAction("Plot", self)
@@ -3201,7 +3202,7 @@ class MainWindow(QMainWindow):
         self._sb_ready.setText("● Ready" if ok else "● Busy")
 
     def _apply_accent(self, accent: str):
-        QApplication.instance().setStyleSheet(build_style(accent, _APP_DARK))
+        QApplication.instance().setStyleSheet(build_style(accent, _APP_DARK, spectra_theme.UI_SCALE))
         if getattr(self, "header", None) is not None:
             self.header.apply_theme(_APP_DARK)
 
@@ -3231,7 +3232,7 @@ class MainWindow(QMainWindow):
                 self.header.btn_theme.blockSignals(False)
             self.header.apply_theme(dark)
         accent = MODE_BY_KEY[self._current_mode]['accent']
-        QApplication.instance().setStyleSheet(build_style(accent, dark))
+        QApplication.instance().setStyleSheet(build_style(accent, dark, spectra_theme.UI_SCALE))
 
     def _on_coord_motion(self, event):
         if event.inaxes is None:
@@ -3335,11 +3336,14 @@ def _load_bundled_fonts():
 def main():
     if sys.platform == 'darwin':
         os.environ.setdefault('QT_MAC_WANTS_LAYER', '1')
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
+    init_ui_scale(app)
     _load_bundled_fonts()
-    app.setStyleSheet(build_style(MODES[0]['accent']))
-    app.setFont(QFont('Segoe UI', 9))
+    app.setStyleSheet(build_style(MODES[0]['accent'], False, spectra_theme.UI_SCALE))
+    app.setFont(QFont('Segoe UI', s(9)))
     splash = create_loading_screen()
     splash.show()
     app.processEvents()
