@@ -90,6 +90,12 @@ class SpectraStaticRegressionTest(unittest.TestCase):
         self.assertIn("if requested_px == self.applied_size_pixels():", method)
         self.assertIn("return", method)
 
+    def test_pl_baseline_correction_uses_lowest_point(self):
+        source = _function_source("_pl_trace_y")
+
+        self.assertIn("np.min(y)", source)
+        self.assertNotIn("y[0]", source)
+
     def test_iv_curve_mode_has_dedicated_dataset_ui(self):
         source = SOURCE.read_text(encoding="utf-8")
         # MODES definition moved to spectra_theme; search both files
@@ -119,7 +125,7 @@ class SpectraStaticRegressionTest(unittest.TestCase):
         self.assertNotIn("self.controls.spin_fw.valueChanged.connect(self._update_canvas_size)", source)
         self.assertNotIn("self.controls.spin_fh.valueChanged.connect(self._update_canvas_size)", source)
 
-    def test_selected_tabs_use_full_accent_fill(self):
+    def test_selected_tabs_use_neutral_graphite_chrome(self):
         # QSS rules moved to spectra_theme; search both files
         source = SOURCE.read_text(encoding="utf-8") + THEME.read_text(encoding="utf-8")
 
@@ -127,10 +133,53 @@ class SpectraStaticRegressionTest(unittest.TestCase):
         self.assertIn("QTabBar::tab:selected", source)
         header_block = source.split("QPushButton#headerTab:checked {{", 1)[1].split("}}", 1)[0]
         tab_block = source.split("QTabBar::tab:selected {{", 1)[1].split("}}", 1)[0]
-        self.assertIn("background: {ACCENT};", header_block)
-        self.assertIn("background: {ACCENT};", tab_block)
-        self.assertNotIn("border: 2px solid {ACCENT};", header_block)
-        self.assertNotIn("border-top: 2px solid {ACCENT};", tab_block)
+        self.assertIn("background: {PRIMARY};", header_block)
+        self.assertIn("background: {PRIMARY};", tab_block)
+        self.assertNotIn("background: {ACCENT};", header_block)
+        self.assertNotIn("background: {ACCENT};", tab_block)
+        self.assertNotIn("border-color: {ACCENT};", header_block)
+        self.assertNotIn("border-color: {ACCENT};", tab_block)
+
+    def test_figure_tabs_use_centered_light_selected_state(self):
+        source = THEME.read_text(encoding="utf-8")
+
+        tab_block = source.split("QPushButton#figureTab {{", 1)[1].split("}}", 1)[0]
+        selected_block = source.split("QPushButton#figureTab:checked {{", 1)[1].split("}}", 1)[0]
+
+        self.assertIn("text-align: center;", tab_block)
+        self.assertIn("background: {HOVER};", selected_block)
+        self.assertIn("color: {INK};", selected_block)
+        self.assertNotIn("background: {PRIMARY};", selected_block)
+
+    def test_color_picker_buttons_match_compact_input_height(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        refresh_block = source.split("def _refresh(self):", 1)[1].split("def _pick(self):", 1)[0]
+
+        self.assertIn("min-height:26px", refresh_block)
+        self.assertIn("max-height:26px", refresh_block)
+        self.assertIn("border-radius:6px", refresh_block)
+        self.assertNotIn("min-height:32px", refresh_block)
+
+    def test_removed_dead_qt_imports_do_not_return(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        import_block = source.split("try:", 1)[1].split("except ModuleNotFoundError", 1)[0]
+
+        for name in ("QSplitter", "QGridLayout", "QEvent", "QSettings", "QByteArray"):
+            self.assertNotIn(name, import_block)
+
+    def test_control_panel_does_not_keep_noop_accent_hook(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        control_panel = source.split("class ControlPanel", 1)[1].split("class TextEditDialog", 1)[0]
+
+        self.assertNotIn("def _apply_accent", control_panel)
+        self.assertNotIn("self._apply_accent", control_panel)
+
+    def test_unfinished_layers_pane_is_removed(self):
+        source = SOURCE.read_text(encoding="utf-8")
+
+        self.assertNotIn("class LayersPanel", source)
+        self.assertNotIn("dock_layers", source)
+        self.assertNotIn("layers_dock", source)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@ PL · Absorbance · XRD
 import sys
 import os
 import re
+import json
+from dataclasses import dataclass
 
 try:
     import numpy as np
@@ -23,14 +25,13 @@ try:
         QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
         QAbstractSpinBox, QCheckBox, QLineEdit, QFileDialog, QScrollArea,
         QGroupBox, QColorDialog, QMessageBox, QListWidget, QListWidgetItem,
-        QAbstractItemView, QSplitter, QTabWidget, QGridLayout,
+        QAbstractItemView, QTabWidget,
         QSizePolicy, QDialog, QDialogButtonBox, QFormLayout,
         QButtonGroup, QSplashScreen, QProgressBar,
         QToolButton, QFrame, QSlider,
-        QToolBar, QStatusBar, QDockWidget, QTableWidget, QTableWidgetItem,
-        QHeaderView, QPlainTextEdit,
+        QDockWidget, QPlainTextEdit, QStackedWidget,
     )
-    from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QSize, QSettings, QByteArray
+    from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
     from PyQt6.QtGui import (QFont, QColor, QCursor, QPixmap, QFontDatabase,
                               QUndoStack, QUndoCommand, QKeySequence,
                               QAction, QActionGroup)
@@ -322,8 +323,9 @@ class ColorButton(QPushButton):
         txt = '#fff' if luma < 140 else '#222'
         self.setStyleSheet(
             f'QPushButton#colorpick {{ background:{self._hex}; color:{txt}; '
-            f'border:1px solid rgba(0,0,0,0.18); border-radius:7px; '
-            f'min-height:32px; font-size:12px; font-weight:700; }}'
+            f'border:1px solid rgba(0,0,0,0.18); border-radius:6px; '
+            f'min-height:26px; max-height:26px; padding:3px 8px; '
+            f'font-size:12px; font-weight:700; }}'
         )
         self.setText(self._hex.upper())
 
@@ -344,17 +346,114 @@ class ColorButton(QPushButton):
 
 # ── Mode tab bar ───────────────────────────────────────────────────────────────
 
+@dataclass
+class FigureState:
+    canvas: object
+    editor: object
+    mode:   str
+    label:  str
+
+
+class FigureTabBar(QWidget):
+    figure_selected      = pyqtSignal(int)
+    figure_close_requested = pyqtSignal(int)
+    figure_add_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName('figureTabBar')
+        self.setFixedHeight(36)
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(8, 4, 8, 4)
+        self._layout.setSpacing(4)
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self._slots: list[tuple[QPushButton, QPushButton]] = []  # (tab_btn, close_btn)
+
+        self._add_btn = QPushButton('+')
+        self._add_btn.setObjectName('figureAddBtn')
+        self._add_btn.setFixedHeight(26)
+        self._add_btn.setFixedWidth(32)
+        self._add_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._add_btn.clicked.connect(self.figure_add_requested)
+        self._layout.addWidget(self._add_btn)
+        self._layout.addStretch()
+
+    def add_figure(self, label: str):
+        idx = len(self._slots)
+        slot = QWidget()
+        slot_lay = QHBoxLayout(slot)
+        slot_lay.setContentsMargins(0, 0, 0, 0)
+        slot_lay.setSpacing(2)
+
+        tab_btn = QPushButton(label)
+        tab_btn.setObjectName('figureTab')
+        tab_btn.setCheckable(True)
+        tab_btn.setFixedHeight(26)
+        tab_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        tab_btn.clicked.connect(lambda _, i=idx: self.figure_selected.emit(i))
+        self._group.addButton(tab_btn)
+
+        close_btn = QPushButton('×')
+        close_btn.setObjectName('figureTabClose')
+        close_btn.setFixedHeight(20)
+        close_btn.setFixedWidth(18)
+        close_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        close_btn.clicked.connect(lambda _, i=idx: self.figure_close_requested.emit(i))
+        close_btn.setVisible(False)  # hidden until >1 tab
+
+        slot_lay.addWidget(tab_btn)
+        slot_lay.addWidget(close_btn)
+        self._slots.append((tab_btn, close_btn))
+
+        # Insert before the "+" button (which is at position 0)
+        self._layout.insertWidget(idx, slot)
+        self._update_close_visibility()
+
+    def remove_figure(self, idx: int):
+        if idx >= len(self._slots):
+            return
+        tab_btn, _ = self._slots[idx]
+        self._group.removeButton(tab_btn)
+        slot_widget = self._layout.itemAt(idx).widget()
+        self._layout.removeWidget(slot_widget)
+        slot_widget.deleteLater()
+        self._slots.pop(idx)
+        # Re-wire click signals for shifted indices
+        for i, (btn, cbtn) in enumerate(self._slots):
+            try:
+                btn.clicked.disconnect()
+            except RuntimeError:
+                pass
+            try:
+                cbtn.clicked.disconnect()
+            except RuntimeError:
+                pass
+            btn.clicked.connect(lambda _, n=i: self.figure_selected.emit(n))
+            cbtn.clicked.connect(lambda _, n=i: self.figure_close_requested.emit(n))
+        self._update_close_visibility()
+
+    def set_active(self, idx: int):
+        if 0 <= idx < len(self._slots):
+            self._slots[idx][0].setChecked(True)
+
+    def _update_close_visibility(self):
+        show = len(self._slots) > 1
+        for _, close_btn in self._slots:
+            close_btn.setVisible(show)
+
+
 class ModeTabBar(QWidget):
     mode_changed = pyqtSignal(str)
 
     # Hard per-tab minimum widths so long labels never clip, regardless of font.
-    _MIN_W = {'pl': 230, 'absorbance': 170, 'xrd': 130, 'iv': 140}
+    _MIN_W = {'pl': 190, 'absorbance': 142, 'xrd': 78, 'iv': 96}
 
     def __init__(self, parent=None):
         super().__init__(parent)
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(10)
+        row.setSpacing(6)
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self.buttons = {}
@@ -367,10 +466,9 @@ class ModeTabBar(QWidget):
             # Use the larger of the spec floor and the measured text width so the
             # label is guaranteed room with padding to spare.
             floor = self._MIN_W.get(m['key'], 130)
-            measured = b.fontMetrics().horizontalAdvance(m['label']) + 52
+            measured = b.fontMetrics().horizontalAdvance(m['label']) + 34
             b.setMinimumWidth(max(floor, measured))
-            b.setMinimumHeight(48)
-            add_shadow(b, blur=14, y=3, alpha=18)
+            b.setMinimumHeight(34)
             b.clicked.connect(lambda _, k=m['key']: self._select(k))
             self._group.addButton(b)
             self.buttons[m['key']] = b
@@ -379,8 +477,16 @@ class ModeTabBar(QWidget):
         self._current = MODES[0]['key']
 
     def _select(self, key: str):
+        if key in self.buttons:
+            self.buttons[key].setChecked(True)
         self._current = key
         self.mode_changed.emit(key)
+
+    def set_current(self, key: str):
+        if key not in self.buttons:
+            return
+        self._current = key
+        self.buttons[key].setChecked(True)
 
     def current(self) -> str:
         return self._current
@@ -394,15 +500,15 @@ class TopHeader(QWidget):
     plot_requested = pyqtSignal()
 
     # Fallback font stack if Montserrat is unavailable
-    _TITLE_FF = "'Montserrat','Segoe UI Variable','Segoe UI','Inter',sans-serif"
+    _TITLE_FF = "'Segoe UI Variable','Segoe UI','IBM Plex Sans','Inter',sans-serif"
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('topHeader')
-        self.setFixedHeight(78)
+        self.setFixedHeight(80)
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(20, 0, 20, 0)
+        lay.setContentsMargins(14, 0, 14, 0)
         lay.setSpacing(0)
 
         # ── Logo image (assets/logo.png, optional)
@@ -417,7 +523,7 @@ class TopHeader(QWidget):
                 Qt.TransformationMode.SmoothTransformation))
             logo_lbl.setFixedSize(48, 48)
             lay.addWidget(logo_lbl)
-            lay.addSpacing(12)
+            lay.addSpacing(11)
 
         # ── Brand block: SPECTRA + plot title over subtitle
         brand = QWidget()
@@ -438,7 +544,7 @@ class TopHeader(QWidget):
         bcol.addWidget(subtitle)
         bcol.addStretch()
         lay.addWidget(brand)
-        lay.addSpacing(36)
+        lay.addSpacing(22)
 
         self.mode_tabs = ModeTabBar()
         self.mode_tabs.mode_changed.connect(self.mode_changed)
@@ -448,33 +554,33 @@ class TopHeader(QWidget):
 
         self.btn_plot = QPushButton('PLOT')
         self.btn_plot.setObjectName('headerPlotBtn')
-        self.btn_plot.setFixedHeight(40)
-        self.btn_plot.setMinimumWidth(110)
+        self.btn_plot.setFixedHeight(42)
+        self.btn_plot.setMinimumWidth(96)
         self.btn_plot.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_plot.clicked.connect(self.plot_requested)
-        add_shadow(self.btn_plot, blur=16, y=3, alpha=30)
         lay.addWidget(self.btn_plot)
-        lay.addSpacing(12)
+        lay.addSpacing(8)
 
         self.btn_theme = QPushButton('Dark')
         self.btn_theme.setObjectName('themeToggle')
         self.btn_theme.setCheckable(True)
-        self.btn_theme.setFixedSize(64, 32)
+        self.btn_theme.setFixedSize(62, 36)
         self.btn_theme.toggled.connect(self.theme_toggled)
         lay.addWidget(self.btn_theme)
 
     def _set_title_colors(self, ink: str, muted: str):
         ff = self._TITLE_FF
         self._title_lbl.setText(
-            f'<span style="font-family:{ff};font-size:28px;font-weight:800;'
-            f'letter-spacing:-0.5px;color:{ink};">SPECTRA</span>'
-            f'<span style="font-family:{ff};font-size:28px;font-weight:300;'
+            f'<span style="font-family:{ff};font-size:30px;font-weight:800;'
+            f'letter-spacing:0;color:{ink};">SPECTRA</span>'
+            f'<span style="font-family:{ff};font-size:30px;font-weight:300;'
             f'color:{muted};">plot</span>'
         )
 
     def apply_theme(self, dark: bool):
         self._set_title_colors('#D4D4D4' if dark else '#171717',
                                '#6A6A6A' if dark else '#5F5F5F')
+        self.btn_theme.setText('Light' if dark else 'Dark')
 
 
 # ── Trace edit dialog ─────────────────────────────────────────────────────────
@@ -1082,7 +1188,7 @@ class ControlPanel(QScrollArea):
         sgl.setSpacing(9)
 
         self.spin_lw = FlatDoubleSpinBox()
-        self.spin_lw.setRange(0.5, 6.0); self.spin_lw.setSingleStep(0.5); self.spin_lw.setValue(2.0)
+        self.spin_lw.setRange(0.5, 6.0); self.spin_lw.setSingleStep(0.5); self.spin_lw.setValue(1.5)
         sgl.addLayout(_labeled('Line width', self.spin_lw))
 
         self.spin_fs = FlatSpinBox()
@@ -1156,7 +1262,7 @@ class ControlPanel(QScrollArea):
         tgl.addLayout(_labeled('Tick length', self.spin_tick_len))
         self.spin_tick_w = FlatDoubleSpinBox()
         self.spin_tick_w.setRange(0.1, 6.0); self.spin_tick_w.setSingleStep(0.1)
-        self.spin_tick_w.setDecimals(1); self.spin_tick_w.setValue(0.8)
+        self.spin_tick_w.setDecimals(1); self.spin_tick_w.setValue(2.0)
         tgl.addLayout(_labeled('Tick width', self.spin_tick_w))
         tgl.addStretch(1)
 
@@ -1180,10 +1286,10 @@ class ControlPanel(QScrollArea):
         # slider + spinbox: distance from axis numbers to box outline
         self.slider_numpad = QSlider(Qt.Orientation.Horizontal)
         self.slider_numpad.setRange(0, 30)
-        self.slider_numpad.setValue(6)
+        self.slider_numpad.setValue(10)
         self.spin_numpad = FlatSpinBox()
         self.spin_numpad.setRange(0, 30)
-        self.spin_numpad.setValue(6)
+        self.spin_numpad.setValue(10)
         self.spin_numpad.setFixedWidth(44)
         self.slider_numpad.valueChanged.connect(self.spin_numpad.setValue)
         self.spin_numpad.valueChanged.connect(self.slider_numpad.setValue)
@@ -1261,7 +1367,7 @@ class ControlPanel(QScrollArea):
         bgl.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.spin_box_lw = FlatDoubleSpinBox()
         self.spin_box_lw.setRange(0.2, 6.0); self.spin_box_lw.setSingleStep(0.1)
-        self.spin_box_lw.setDecimals(1); self.spin_box_lw.setValue(1.0)
+        self.spin_box_lw.setDecimals(1); self.spin_box_lw.setValue(2.0)
         self.color_box = ColorButton('#000000')
         _box_row = QHBoxLayout(); _box_row.setSpacing(4)
         _box_row.addWidget(self.color_box); _box_row.addWidget(self.spin_box_lw)
@@ -1373,31 +1479,9 @@ class ControlPanel(QScrollArea):
         egl.addLayout(fmt_row)
         lay.addWidget(g6)
 
-        # ── Plot button
-        self.btn_plot = QPushButton('PLOT')
-        self.btn_plot.setObjectName('plotBtn')
-        self.btn_plot.setFixedHeight(48)
-        self.btn_plot.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_plot.clicked.connect(self.plot_requested)
-        lay.addWidget(self.btn_plot)
         lay.addStretch()
 
         self._canvas = None
-        self._apply_accent(MODES[0]['accent'])
-
-    # ── Accent ───────────────────────────────────────────────────────────────────
-
-    def _apply_accent(self, accent: str):
-        self.btn_plot.setStyleSheet(
-            f'QPushButton#plotBtn{{'
-            f'background:#FFFFFF;color:{accent};font-size:12px;'
-            f'font-weight:700;border-radius:8px;min-height:44px;'
-            f'border:2px solid {accent};letter-spacing:3px;}}'
-            f'QPushButton#plotBtn:hover{{'
-            f'background:{accent};color:#FFFFFF;}}'
-            f'QPushButton#plotBtn:pressed{{'
-            f'background:{accent};color:#FFFFFF;}}'
-        )
 
     # ── Slots ──────────────────────────────────────────────────────────────────
 
@@ -1410,7 +1494,6 @@ class ControlPanel(QScrollArea):
         self.g_iv.setVisible(is_iv)
         self.g_pl.setVisible(key == 'pl')
         self.g_xrd.setVisible(key == 'xrd')
-        self._apply_accent(MODE_BY_KEY[key]['accent'])
 
     def current_mode(self) -> str:
         return self._current_mode
@@ -1627,6 +1710,113 @@ class ControlPanel(QScrollArea):
             'snap_enabled': self.chk_snap.isChecked(),
             'snap_step': self.spin_snap_step.value(),
         }
+
+
+    # Keys from settings() that represent pure style (safe to save/restore as presets)
+    _PRESET_KEYS = {
+        'linewidth', 'fontsize', 'font_family', 'fig_width', 'fig_height',
+        'tick_dir', 'show_xticks', 'show_yticks', 'show_top_ticks', 'show_right_ticks',
+        'minor_ticks', 'tick_length', 'tick_width', 'x_tick_pad', 'y_tick_pad',
+        'y_notation', 'force_sci', 'sci_exp',
+        'show_legend', 'legend_loc', 'legend_transparent_bg', 'legend_bg_color',
+        'legend_bg_alpha', 'legend_transparent_edge', 'legend_edge_color',
+        'legend_edge_width', 'legend_fontsize', 'legend_peak_order',
+        'box_linewidth', 'box_color', 'manual_layout',
+        'pa_width', 'pa_height', 'pa_left', 'pa_bottom', 'panel_gap',
+        'snap_enabled', 'snap_step',
+        'pl_baseline_correct',
+        'xrd_d_spacing', 'xrd_lambda', 'xrd_ref_step', 'xrd_exp_step',
+        'xrd_margin_labels', 'xrd_margin_label_gap',
+    }
+
+    def _style_preset(self) -> dict:
+        return {k: v for k, v in self.settings().items() if k in self._PRESET_KEYS}
+
+    def _apply_style_preset(self, p: dict):
+        def _set(widget, val):
+            widget.blockSignals(True)
+            widget.setValue(val)
+            widget.blockSignals(False)
+        if 'linewidth'              in p: _set(self.spin_lw, p['linewidth'])
+        if 'fontsize'               in p: _set(self.spin_fs, p['fontsize'])
+        if 'fig_width'              in p: _set(self.spin_fw, p['fig_width'])
+        if 'fig_height'             in p: _set(self.spin_fh, p['fig_height'])
+        if 'tick_length'            in p: _set(self.spin_tick_len, p['tick_length'])
+        if 'tick_width'             in p: _set(self.spin_tick_w, p['tick_width'])
+        if 'x_tick_pad'             in p:
+            _set(self.spin_numpad, p['x_tick_pad'])
+            _set(self.slider_numpad, p['x_tick_pad'])
+        if 'box_linewidth'          in p: _set(self.spin_box_lw, p['box_linewidth'])
+        if 'legend_bg_alpha'        in p: _set(self.spin_legend_alpha, p['legend_bg_alpha'])
+        if 'legend_edge_width'      in p: _set(self.spin_legend_edge_w, p['legend_edge_width'])
+        if 'legend_fontsize'        in p: _set(self.spin_legend_fs, p['legend_fontsize'])
+        if 'pa_width'               in p: _set(self.spin_pa_w, p['pa_width'])
+        if 'pa_height'              in p: _set(self.spin_pa_h, p['pa_height'])
+        if 'pa_left'                in p: _set(self.spin_pa_left, p['pa_left'])
+        if 'pa_bottom'              in p: _set(self.spin_pa_bottom, p['pa_bottom'])
+        if 'panel_gap'              in p: _set(self.spin_panel_gap, p['panel_gap'])
+        if 'snap_step'              in p: _set(self.spin_snap_step, p['snap_step'])
+        if 'xrd_lambda'             in p: _set(self.spin_lam, p['xrd_lambda'])
+        if 'xrd_ref_step'           in p: _set(self.spin_ref_step, p['xrd_ref_step'])
+        if 'xrd_exp_step'           in p: _set(self.spin_exp_step, p['xrd_exp_step'])
+        if 'xrd_margin_label_gap'   in p: _set(self.spin_xrd_label_gap, p['xrd_margin_label_gap'])
+        if 'sci_exp'                in p: _set(self.spin_sci_exp, p['sci_exp'])
+        # Checkboxes
+        for attr, key in [
+            (self.chk_xticks,              'show_xticks'),
+            (self.chk_yticks,              'show_yticks'),
+            (self.chk_top_ticks,           'show_top_ticks'),
+            (self.chk_right_ticks,         'show_right_ticks'),
+            (self.chk_minor_ticks,         'minor_ticks'),
+            (self.chk_legend,              'show_legend'),
+            (self.chk_legend_transp_bg,    'legend_transparent_bg'),
+            (self.chk_legend_transp_edge,  'legend_transparent_edge'),
+            (self.chk_legend_peak_order,   'legend_peak_order'),
+            (self.chk_manual_box,          'manual_layout'),
+            (self.chk_snap,                'snap_enabled'),
+            (self.chk_pl_baseline,         'pl_baseline_correct'),
+            (self.chk_d,                   'xrd_d_spacing'),
+            (self.chk_xrd_margin_labels,   'xrd_margin_labels'),
+            (self.chk_force_sci,           'force_sci'),
+        ]:
+            if key in p:
+                attr.blockSignals(True)
+                attr.setChecked(p[key])
+                attr.blockSignals(False)
+        # Combos
+        if 'tick_dir'      in p: self.combo_tick_dir.setCurrentText(p['tick_dir'])
+        if 'y_notation'    in p: self.combo_ynot.setCurrentText(p['y_notation'])
+        if 'legend_loc'    in p: self.combo_legend_loc.setCurrentText(p['legend_loc'])
+        if 'font_family'   in p: self.combo_font.setCurrentText(p['font_family'])
+        # Color buttons
+        if 'box_color'         in p: self.color_box.set_hex(p['box_color'])
+        if 'legend_bg_color'   in p: self.color_legend_bg.set_hex(p['legend_bg_color'])
+        if 'legend_edge_color' in p: self.color_legend_edge.set_hex(p['legend_edge_color'])
+
+    def save_preset(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Save Preset', '', 'JSON Preset (*.json)')
+        if not path:
+            return
+        if not path.endswith('.json'):
+            path += '.json'
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(self._style_preset(), f, indent=2)
+        except Exception as e:
+            QMessageBox.warning(self, 'Save Failed', str(e))
+
+    def load_preset(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Load Preset', '', 'JSON Preset (*.json)')
+        if not path:
+            return
+        try:
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+            self._apply_style_preset(data)
+        except Exception as e:
+            QMessageBox.warning(self, 'Load Failed', str(e))
 
 
 # ── Interactive editing dialogs ────────────────────────────────────────────────
@@ -2292,7 +2482,7 @@ def _trace_visual(tr: dict, grad_colors, k: int, use_gradient: bool,
 def _pl_trace_y(y, baseline_correct: bool):
     """Apply the PL baseline correction used by the original MATLAB scripts."""
     if baseline_correct and len(y):
-        return y - y[0]
+        return y - np.min(y)
     return y
 
 
@@ -2719,50 +2909,6 @@ def create_loading_screen() -> QSplashScreen:
     return splash
 
 
-class LayersPanel(QWidget):
-    """Read-only reflection of the traces in the current plot settings."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("layersPanel")
-        self._rows = []
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 6, 6, 6)
-        lay.setSpacing(4)
-        self.table = QTableWidget(0, 3)
-        self.table.setObjectName("layersTable")
-        self.table.setHorizontalHeaderLabels(["", "Trace", "Vis"])
-        self.table.verticalHeader().setVisible(False)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        lay.addWidget(self.table)
-        empty = QLabel("No traces yet — add data and Plot.")
-        empty.setObjectName("hint")
-        lay.addWidget(empty)
-        self._empty = empty
-
-    def set_rows(self, rows: list):
-        self._rows = list(rows)
-        self.table.setRowCount(len(self._rows))
-        for i, r in enumerate(self._rows):
-            swatch = QTableWidgetItem("")
-            swatch.setBackground(QColor(r.get("color", "#000000")))
-            self.table.setItem(i, 0, swatch)
-            self.table.setItem(i, 1, QTableWidgetItem(str(r.get("label", f"Trace {i+1}"))))
-            self.table.setItem(i, 2, QTableWidgetItem("●" if r.get("visible", True) else "○"))
-        self._empty.setVisible(len(self._rows) == 0)
-
-    def row_count(self) -> int:
-        return self.table.rowCount()
-
-    def label_at(self, i: int) -> str:
-        item = self.table.item(i, 1)
-        return item.text() if item else ""
-
-
 class LogPanel(QWidget):
     """Append-only message console echoing status-bar messages."""
     def __init__(self, parent=None):
@@ -2783,66 +2929,39 @@ class LogPanel(QWidget):
         return self.view.toPlainText()
 
 
-class BottomStatusBar(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName('bottomStatusBar')
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setFixedHeight(26)
-
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(10, 0, 12, 0)
-        lay.setSpacing(5)
-
-        self._dot = QLabel('●')
-        self._dot.setObjectName('readyDot')
-        self._state = QLabel('Ready')
-        self._state.setObjectName('stateLabel')
-        self._msg = QLabel()
-        self._msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._msg.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self._coord = QLabel()
-        self._coord.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._coord.setObjectName('coordLabel')
-        self._coord.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-
-        lay.addWidget(self._dot)
-        lay.addWidget(self._state)
-        lay.addSpacing(6)
-        lay.addWidget(self._msg)
-        lay.addWidget(self._coord)
-
-    def show_message(self, msg: str):
-        self._msg.setText(msg)
-
-    def update_coords(self, text: str):
-        self._coord.setText(text)
-
-    def clear_coords(self):
-        self._coord.clear()
-
-    def set_ready(self, ok: bool):
-        color = '#22C55E' if ok else '#EF4444'
-        self._dot.setStyleSheet(f'QLabel {{ color: {color}; font-size: 11px; font-weight: 700; }}')
-
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('SPECTRAplot')
-        self.resize(1300, 820)
-        self.setMinimumSize(920, 580)
+        self.resize(1520, 900)
+        self.setMinimumSize(1100, 640)
 
         self._current_mode = MODES[0]['key']
 
         self.controls = ControlPanel()
-        self.canvas = PlotCanvas()
-        self.controls._canvas = self.canvas
-        self.editor = FigureEditor(self.canvas)
+        self._figure_states: list[FigureState] = []
+        self._active_fig_idx: int = 0
+        self.figure_tab_bar = FigureTabBar()
+        self.canvas_stack = QStackedWidget()
         self._build_chrome()
 
-        # Central widget: the plot canvas
-        self.setCentralWidget(self.canvas)
+        self.app_root = QWidget()
+        self.app_root.setObjectName('appRoot')
+        root_lay = QVBoxLayout(self.app_root)
+        root_lay.setContentsMargins(0, 0, 0, 0)
+        root_lay.setSpacing(0)
+        self.header = TopHeader()
+        self.header.mode_changed.connect(self._on_mode_change)
+        self.header.theme_toggled.connect(self._on_theme_toggle)
+        self.header.plot_requested.connect(self._do_plot)
+        root_lay.addWidget(self.header)
+        root_lay.addWidget(self.figure_tab_bar)
+        root_lay.addWidget(self.canvas_stack, 1)
+        self.setCentralWidget(self.app_root)
+
+        # Create the first figure state (canvas + editor) and activate it
+        self._switch_figure(self._add_figure_state(mode=MODES[0]['key']))
 
         # ── Left dock: Build / Parameters (the ControlPanel) ────────────────
         self.dock_build = QDockWidget("Build", self)
@@ -2852,14 +2971,30 @@ class MainWindow(QMainWindow):
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock_build)
 
-        # ── Bottom dock: Plot Style (the four style groups) ─────────────────
+        # ── Plot Style dock: left area, next to Build (stacked vertically) ─────
         style_host = QWidget()
         style_host.setObjectName("plotStyleHost")
-        style_lay = QHBoxLayout(style_host)
-        style_lay.setContentsMargins(8, 6, 8, 8)
-        style_lay.setSpacing(10)
+        style_lay = QVBoxLayout(style_host)
+        style_lay.setContentsMargins(8, 8, 8, 8)
+        style_lay.setSpacing(8)
+
+        # ── Preset buttons at the top of the style dock ──────────────────────
+        preset_row = QWidget()
+        preset_lay = QHBoxLayout(preset_row)
+        preset_lay.setContentsMargins(0, 0, 0, 0)
+        preset_lay.setSpacing(6)
+        btn_save_preset = QPushButton('Save Preset')
+        btn_save_preset.setObjectName('presetBtn')
+        btn_load_preset = QPushButton('Load Preset')
+        btn_load_preset.setObjectName('presetBtn')
+        btn_save_preset.clicked.connect(self.controls.save_preset)
+        btn_load_preset.clicked.connect(self.controls.load_preset)
+        preset_lay.addWidget(btn_save_preset)
+        preset_lay.addWidget(btn_load_preset)
+        style_lay.addWidget(preset_row)
+
         for group in self.controls.take_dock_groups():
-            group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+            group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
             style_lay.addWidget(group)
         style_lay.addStretch()
         style_scroll = QScrollArea()
@@ -2867,37 +3002,37 @@ class MainWindow(QMainWindow):
         style_scroll.setWidget(style_host)
         style_scroll.setWidgetResizable(True)
         style_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        style_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        style_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         self.dock_style = QDockWidget("Plot Style", self)
         self.dock_style.setObjectName("dock_style")
         self.dock_style.setWidget(style_scroll)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.dock_style)
+        self.dock_style.setMinimumWidth(360)
+        self.dock_style.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_style)
 
-        # ── Right dock: Layers (trace manager reflection) ───────────────────
-        self.layers_dock = LayersPanel()
-        self.dock_layers = QDockWidget("Layers", self)
-        self.dock_layers.setObjectName("dock_layers")
-        self.dock_layers.setWidget(self.layers_dock)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_layers)
-
-        # ── Log dock: tabbed with Plot Style at the bottom ──────────────────
+        # ── Log dock: bottom area ───────────────────────────────────────────
         self.log_dock = LogPanel()
         self.dock_log = QDockWidget("Log", self)
         self.dock_log.setObjectName("dock_log")
         self.dock_log.setWidget(self.log_dock)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.dock_log)
-        self.tabifyDockWidget(self.dock_style, self.dock_log)
-        self.dock_style.raise_()
+
+        # Left dock owns left corners; right dock owns right corners (full height)
+        self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.setCorner(Qt.Corner.TopLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.RightDockWidgetArea)
+        self.setCorner(Qt.Corner.TopRightCorner, Qt.DockWidgetArea.RightDockWidgetArea)
 
         # View-menu dock toggles (inserted before the Dark Mode action)
         self.m_view.insertAction(self.act_dark, self.dock_build.toggleViewAction())
         self.m_view.insertAction(self.act_dark, self.dock_style.toggleViewAction())
-        self.m_view.insertAction(self.act_dark, self.dock_layers.toggleViewAction())
         self.m_view.insertAction(self.act_dark, self.dock_log.toggleViewAction())
         self.m_view.insertSeparator(self.act_dark)
 
-        self.resizeDocks([self.dock_build], [360], Qt.Orientation.Horizontal)
+        self._default_state = self.saveState()
+        QTimer.singleShot(0, self._apply_dock_sizes)
 
         self._has_plotted = False
         self._plot_called_for_test = False
@@ -2905,13 +3040,68 @@ class MainWindow(QMainWindow):
         self.controls.live_update_requested.connect(self._auto_replot)
         self.controls.spin_fw.valueChanged.connect(self._mark_canvas_size_pending)
         self.controls.spin_fh.valueChanged.connect(self._mark_canvas_size_pending)
-        self.canvas.size_update_requested.connect(self._update_canvas_size)
         self.controls.chk_snap.toggled.connect(self._update_snap)
         self.controls.spin_snap_step.valueChanged.connect(self._update_snap)
-        self.canvas.canvas.mpl_connect('motion_notify_event', self._on_coord_motion)
+
+        # Figure tab bar signals
+        self.figure_tab_bar.figure_selected.connect(self._switch_figure)
+        self.figure_tab_bar.figure_add_requested.connect(self._on_add_figure)
+        self.figure_tab_bar.figure_close_requested.connect(self._close_figure)
 
         self._status_message('Ready — add files to a panel and click Plot.')
         self._apply_accent(MODES[0]['accent'])
+
+    # ── Figure state properties ───────────────────────────────────────────────
+
+    @property
+    def canvas(self) -> 'PlotCanvas':
+        return self._figure_states[self._active_fig_idx].canvas
+
+    @property
+    def editor(self) -> 'FigureEditor':
+        return self._figure_states[self._active_fig_idx].editor
+
+    # ── Figure management ─────────────────────────────────────────────────────
+
+    def _add_figure_state(self, mode: str = 'pl') -> int:
+        c = PlotCanvas()
+        e = FigureEditor(c)
+        n = len(self._figure_states) + 1
+        state = FigureState(canvas=c, editor=e, mode=mode, label=f'Fig {n}')
+        self._figure_states.append(state)
+        self.canvas_stack.addWidget(c)
+        self.figure_tab_bar.add_figure(state.label)
+        c.size_update_requested.connect(self._update_canvas_size)
+        c.canvas.mpl_connect('motion_notify_event', self._on_coord_motion)
+        return len(self._figure_states) - 1
+
+    def _switch_figure(self, idx: int):
+        if idx < 0 or idx >= len(self._figure_states):
+            return
+        self._active_fig_idx = idx
+        state = self._figure_states[idx]
+        self.canvas_stack.setCurrentIndex(idx)
+        self.figure_tab_bar.set_active(idx)
+        self.controls._canvas = state.canvas
+        self._on_mode_change(state.mode)
+
+    def _on_add_figure(self):
+        idx = self._add_figure_state(mode=self._current_mode)
+        self._switch_figure(idx)
+
+    def _close_figure(self, idx: int):
+        if len(self._figure_states) <= 1:
+            return
+        state = self._figure_states.pop(idx)
+        self.canvas_stack.removeWidget(state.canvas)
+        state.canvas.deleteLater()
+        self.figure_tab_bar.remove_figure(idx)
+        self._switch_figure(min(idx, len(self._figure_states) - 1))
+
+    def _apply_dock_sizes(self):
+        self.resizeDocks([self.dock_build], [260], Qt.Orientation.Horizontal)
+        self.resizeDocks([self.dock_style], [360], Qt.Orientation.Horizontal)
+        self.resizeDocks([self.dock_log], [90], Qt.Orientation.Vertical)
 
     def _build_chrome(self):
         self.act_plot = QAction("Plot", self)
@@ -2924,13 +3114,13 @@ class MainWindow(QMainWindow):
 
         self.act_undo = QAction("Undo", self)
         self.act_undo.setShortcut(QKeySequence.StandardKey.Undo)
-        self.act_undo.triggered.connect(self.editor.undo_stack.undo)
+        self.act_undo.triggered.connect(lambda: self.editor.undo_stack.undo())
 
         self.act_fit = QAction("Fit to Data", self)
-        self.act_fit.triggered.connect(self.canvas._toolbar_fit)
+        self.act_fit.triggered.connect(lambda: self.canvas._toolbar_fit())
         self.act_grid = QAction("Grid", self)
         self.act_grid.setCheckable(True)
-        self.act_grid.toggled.connect(self.canvas._toolbar_grid)
+        self.act_grid.toggled.connect(lambda checked: self.canvas._toolbar_grid(checked))
         self.act_zoom_in = QAction("Zoom In", self)
         self.act_zoom_in.triggered.connect(lambda: self.canvas._zoom_by(1.25))
         self.act_zoom_out = QAction("Zoom Out", self)
@@ -2986,27 +3176,6 @@ class MainWindow(QMainWindow):
         m_help = mb.addMenu("&Help")
         m_help.addAction(self.act_about)
 
-        tb = QToolBar("Main", self)
-        tb.setObjectName("mainToolbar")
-        tb.setMovable(False)
-        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        wm = QLabel("SPECTRAplot")
-        wm.setObjectName("toolbarWordmark")
-        tb.addWidget(wm)
-        tb.addSeparator()
-        tb.addAction(self.act_plot)
-        tb.addAction(self.act_save)
-        tb.addSeparator()
-        for a in self.mode_actions.values():
-            tb.addAction(a)
-        tb.addSeparator()
-        tb.addAction(self.act_fit)
-        tb.addAction(self.act_zoom_out)
-        tb.addAction(self.act_zoom_in)
-        tb.addAction(self.act_grid)
-        self.addToolBar(tb)
-        self.toolbar = tb
-
         sb = self.statusBar()
         self._sb_ready = QLabel("● Ready")
         self._sb_ready.setObjectName("readyDot")
@@ -3033,15 +3202,34 @@ class MainWindow(QMainWindow):
 
     def _apply_accent(self, accent: str):
         QApplication.instance().setStyleSheet(build_style(accent, _APP_DARK))
+        if getattr(self, "header", None) is not None:
+            self.header.apply_theme(_APP_DARK)
 
     def _on_mode_change(self, key: str):
         self._current_mode = key
+        if self._figure_states:
+            self._figure_states[self._active_fig_idx].mode = key
+        if getattr(self, "header", None) is not None:
+            self.header.mode_tabs.set_current(key)
+        action = self.mode_actions.get(key)
+        if action is not None and not action.isChecked():
+            action.setChecked(True)
         self._apply_accent(MODE_BY_KEY[key]['accent'])
         self.controls.set_mode(key)
 
     def _on_theme_toggle(self, dark: bool):
         global _APP_DARK
         _APP_DARK = dark
+        if self.act_dark.isChecked() != dark:
+            self.act_dark.blockSignals(True)
+            self.act_dark.setChecked(dark)
+            self.act_dark.blockSignals(False)
+        if getattr(self, "header", None) is not None:
+            if self.header.btn_theme.isChecked() != dark:
+                self.header.btn_theme.blockSignals(True)
+                self.header.btn_theme.setChecked(dark)
+                self.header.btn_theme.blockSignals(False)
+            self.header.apply_theme(dark)
         accent = MODE_BY_KEY[self._current_mode]['accent']
         QApplication.instance().setStyleSheet(build_style(accent, dark))
 
@@ -3123,19 +3311,6 @@ class MainWindow(QMainWindow):
             self.editor.refresh()
             self._has_plotted = True
             self._status_message(msg + '   ·   Double-click figure text to edit · drag to reposition.')
-            try:
-                cfg = self.controls.settings()
-                rows = []
-                for panel in cfg.get("panel_data", []):
-                    for tr in panel.get("traces", []):
-                        rows.append({
-                            "label": tr.get("display_name", tr.get("name", "")),
-                            "color": tr.get("color", "#000000"),
-                            "visible": tr.get("visible", True),
-                        })
-                self.layers_dock.set_rows(rows)
-            except Exception:
-                pass  # Layers is a reflection; never let it break plotting.
         except Exception as e:
             if not silent:
                 QMessageBox.critical(self, 'Plot Error', str(e))
@@ -3169,7 +3344,7 @@ def main():
     splash.show()
     app.processEvents()
     win = MainWindow()
-    win.show()
+    win.showMaximized()
     splash.finish(win)
     sys.exit(app.exec())
 

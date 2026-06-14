@@ -43,6 +43,27 @@ class SpectraUILayoutTest(unittest.TestCase):
 
         self.assertLessEqual(panel.widget().width(), panel.viewport().width())
 
+    def test_figure_tabs_use_centered_light_selected_state(self):
+        style = spectra_app.build_style(spectra_app.MODES[0]["accent"])
+
+        tab_block = style.split("QPushButton#figureTab {", 1)[1].split("}", 1)[0]
+        selected_block = style.split("QPushButton#figureTab:checked {", 1)[1].split("}", 1)[0]
+
+        self.assertIn("text-align: center;", tab_block)
+        self.assertIn("background: #E8E8E8;", selected_block)
+        self.assertIn("color: #171717;", selected_block)
+        self.assertNotIn("background: {PRIMARY};", selected_block)
+
+    def test_color_picker_buttons_match_compact_input_height(self):
+        qapp()
+        button = spectra_app.ColorButton("#000000")
+        button_style = button.styleSheet()
+
+        self.assertIn("min-height:26px", button_style)
+        self.assertIn("max-height:26px", button_style)
+        self.assertIn("border-radius:6px", button_style)
+        self.assertNotIn("min-height:32px", button_style)
+
 
 if __name__ == "__main__":
     unittest.main()

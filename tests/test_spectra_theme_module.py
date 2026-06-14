@@ -22,6 +22,18 @@ class ThemeModuleTest(unittest.TestCase):
         self.assertIn("QMainWindow", light)
         self.assertNotEqual(light, dark)
 
+    def test_build_style_reuses_cached_stylesheets(self):
+        import spectra_theme
+        spectra_theme.build_style.cache_clear()
+
+        spectra_theme.build_style(spectra_theme.MODES[0]["accent"])
+        before = spectra_theme.build_style.cache_info()
+        spectra_theme.build_style(spectra_theme.MODES[0]["accent"])
+        after = spectra_theme.build_style.cache_info()
+
+        self.assertEqual(after.hits, before.hits + 1)
+        self.assertEqual(after.misses, before.misses)
+
 
 if __name__ == "__main__":
     unittest.main()

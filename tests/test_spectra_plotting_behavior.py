@@ -125,6 +125,30 @@ class SpectraPlottingBehaviorTest(unittest.TestCase):
     def test_pl_baseline_correction_subtracts_first_point_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "pl_trace.csv"
+            path.write_text("400,4\n450,7\n500,5\n", encoding="utf-8")
+            fig = Figure()
+
+            spectra_app.do_plot(fig, base_settings(
+                n_panels=1,
+                panel_data=[{
+                    "traces": [{
+                        "path": str(path),
+                        "display_name": "PL trace",
+                        "color": "#000000",
+                        "visible": True,
+                        "use_auto_gradient_color": False,
+                    }],
+                    "gradient": ("#000000", "#000000"),
+                    "use_gradient": False,
+                }],
+                pl_baseline_correct=True,
+            ))
+
+            self.assertEqual(fig.axes[0].lines[0].get_ydata().tolist(), [0.0, 3.0, 1.0])
+
+    def test_pl_baseline_correction_subtracts_lowest_point_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pl_trace.csv"
             path.write_text("400,5\n450,7\n500,4\n", encoding="utf-8")
             fig = Figure()
 
@@ -144,7 +168,7 @@ class SpectraPlottingBehaviorTest(unittest.TestCase):
                 pl_baseline_correct=True,
             ))
 
-            self.assertEqual(fig.axes[0].lines[0].get_ydata().tolist(), [0.0, 2.0, -1.0])
+            self.assertEqual(fig.axes[0].lines[0].get_ydata().tolist(), [1.0, 3.0, 0.0])
 
     def test_pl_baseline_correction_can_be_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:

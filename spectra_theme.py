@@ -7,6 +7,7 @@ all existing call-sites continue to resolve without modification.
 """
 
 import sys
+from functools import lru_cache
 
 from matplotlib.colors import to_rgb, to_hex
 from PyQt6.QtWidgets import QGraphicsDropShadowEffect
@@ -43,6 +44,7 @@ MODE_BY_KEY = {m['key']: m for m in MODES}
 
 
 # ── Stylesheet ────────────────────────────────────────────────────────────────
+@lru_cache(maxsize=16)
 def build_style(_accent: str, dark: bool = False) -> str:
     if dark:
         BG       = '#1E1E1E'
@@ -70,7 +72,16 @@ def build_style(_accent: str, dark: bool = False) -> str:
         TBAR_BG  = '#2A2A2A'
         TBAR_BTN = '#3C3C3C'
         TBAR_BRD = '#4A4A4A'
-    ACCENT  = _accent     # per-mode signature color for checked/active states
+    ACCENT  = _accent     # per-mode signature color for plotted data defaults
+    try:
+        _ar, _ag, _ab = to_rgb(ACCENT)
+        _alum = 0.2126 * _ar + 0.7152 * _ag + 0.0722 * _ab
+        ON_ACCENT = '#111111' if _alum > 0.35 else '#FFFFFF'
+    except Exception:
+        ON_ACCENT = '#111111'
+    # Contrast-safe accent for text on white (or on dark bg in dark mode)
+    ACCENT_TEXT = ACCENT if dark else darken(ACCENT, 0.52)
+    ON_PRIMARY = '#171717' if dark else '#FFFFFF'
     return f"""
 /* ── Global reset ───────────────────────────────────────────────────────── */
 * {{
@@ -95,16 +106,16 @@ QGroupBox {{
     border: 1px solid {BORDER};
     border-radius: 8px;
     margin-top: 0px;
-    padding: 34px 12px 12px 12px;
+    padding: 22px 10px 10px 10px;
 }}
 QGroupBox::title {{
     subcontrol-origin: padding;
     subcontrol-position: top left;
-    top: 10px;
+    top: 6px;
     left: 12px;
     padding: 0px;
     background: transparent;
-    color: {INK};
+    color: {ACCENT_TEXT};
     font-size: 12px;
     font-weight: 700;
     letter-spacing: 0.3px;
@@ -116,10 +127,10 @@ QPushButton {{
     color: {INK};
     border: 1px solid {BORDER};
     border-radius: 6px;
-    padding: 5px 14px;
+    padding: 4px 12px;
     font-size: 12px;
     font-weight: 500;
-    min-height: 30px;
+    min-height: 26px;
     letter-spacing: 0.1px;
 }}
 QPushButton:hover {{
@@ -165,23 +176,25 @@ QPushButton#danger:hover {{
 
 QPushButton#colorpick {{
     border: 1px solid {BORDER};
-    border-radius: 8px;
-    min-height: 32px;
+    border-radius: 6px;
+    min-height: 26px;
+    max-height: 26px;
+    padding: 3px 8px;
     font-size: 12px;
     font-weight: 600;
-    letter-spacing: 0.4px;
+    letter-spacing: 0.1px;
 }}
 
 /* ── Top header ─────────────────────────────────────────────────────────── */
 #topHeader {{
     background: {BG};
     border-bottom: 1px solid {BORDER};
-    min-height: 78px;
-    max-height: 78px;
+    min-height: 62px;
+    max-height: 62px;
 }}
 #appRoot {{ background: {BG}; }}
 QLabel#appTitle {{ color: {INK}; padding: 0 2px; }}
-QLabel#brandSub {{ color: {MUTED}; font-size: 13px; font-weight: 500; padding: 0 3px; }}
+QLabel#brandSub {{ color: {MUTED}; font-size: 12px; font-weight: 500; padding: 0 3px; }}
 
 /* ── Loading screen ─────────────────────────────────────────────────────── */
 #loadingScreen {{
@@ -209,22 +222,22 @@ QPushButton#headerTab {{
     background: {BG};
     color: {MUTED};
     border: 1px solid {BORDER};
-    border-radius: 10px;
-    font-size: 13px;
+    border-radius: 7px;
+    font-size: 12px;
     font-weight: 600;
-    padding: 0px 18px;
-    min-height: 46px;
-    letter-spacing: 0.1px;
+    padding: 0px 12px;
+    min-height: 34px;
+    letter-spacing: 0px;
 }}
 QPushButton#headerTab:hover {{
     color: {INK};
     background: {SURF};
-    border-color: #BDBDBD;
+    border-color: {PRIMARY};
 }}
 QPushButton#headerTab:checked {{
-    color: #171717;
-    background: {ACCENT};
-    border: 1px solid {ACCENT};
+    color: {ON_PRIMARY};
+    background: {PRIMARY};
+    border: 1px solid {PRIMARY};
     font-weight: 700;
 }}
 
@@ -233,15 +246,15 @@ QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {{
     background: {BG};
     border: 1px solid {BORDER};
     border-radius: 6px;
-    padding: 4px 8px;
+    padding: 3px 8px;
     font-size: 12px;
     color: {INK};
-    min-height: 30px;
+    min-height: 26px;
     selection-background-color: {PRIMARY};
     selection-color: #FFFFFF;
 }}
 QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus {{
-    border: 2px solid {ACCENT};
+    border: 1px solid {PRIMARY};
     background: {BG};
     color: {INK};
 }}
@@ -259,7 +272,7 @@ QComboBox QAbstractItemView {{
     border: 1px solid {BORDER};
     color: {INK};
     selection-background-color: {SURF};
-    selection-color: {PRIMARY};
+    selection-color: {ACCENT};
     outline: none;
 }}
 QSpinBox::up-button, QDoubleSpinBox::up-button,
@@ -312,7 +325,7 @@ QTabBar::tab {{
     background: {SURF};
     border: 1px solid {BORDER};
     border-bottom: none;
-    padding: 5px 16px;
+    padding: 4px 12px;
     font-size: 12px;
     font-weight: 600;
     color: {MUTED};
@@ -321,9 +334,9 @@ QTabBar::tab {{
     letter-spacing: 0.2px;
 }}
 QTabBar::tab:selected {{
-    background: {ACCENT};
-    color: #171717;
-    border-color: {ACCENT};
+    background: {PRIMARY};
+    color: {ON_PRIMARY};
+    border-color: {PRIMARY};
 }}
 
 /* ── Canvas area ────────────────────────────────────────────────────────── */
@@ -342,7 +355,7 @@ QTabBar::tab:selected {{
     border-radius: 12px;
 }}
 QLabel#dockTitle {{
-    color: {PRIMARY};
+    color: {ACCENT_TEXT};
     font-size: 12px;
     font-weight: 600;
     letter-spacing: 0.8px;
@@ -394,23 +407,23 @@ QLabel#dockTitle {{
 /* ── Header Plot button (prominent, accent-filled) ──────────────────────── */
 QPushButton#headerPlotBtn {{
     background: {ACCENT};
-    color: #171717;
+    color: {ON_ACCENT};
     border: 1px solid {ACCENT};
-    border-radius: 10px;
-    font-size: 13px;
+    border-radius: 7px;
+    font-size: 12px;
     font-weight: 800;
-    letter-spacing: 3px;
-    padding: 0px 22px;
+    letter-spacing: 1.4px;
+    padding: 0px 16px;
 }}
 QPushButton#headerPlotBtn:hover {{
-    background: {darken(ACCENT, 0.12)};
-    border-color: {darken(ACCENT, 0.12)};
-    color: #FFFFFF;
+    background: {darken(ACCENT, 0.14)};
+    border-color: {darken(ACCENT, 0.14)};
+    color: {ON_ACCENT};
 }}
 QPushButton#headerPlotBtn:pressed {{
-    background: {darken(ACCENT, 0.25)};
-    border-color: {darken(ACCENT, 0.25)};
-    color: #FFFFFF;
+    background: {darken(ACCENT, 0.28)};
+    border-color: {darken(ACCENT, 0.28)};
+    color: {ON_ACCENT};
 }}
 
 /* ── Theme toggle button ────────────────────────────────────────────────── */
@@ -418,14 +431,14 @@ QPushButton#themeToggle {{
     background: {SURF2};
     color: {MUTED};
     border: 1px solid {BORDER};
-    border-radius: 8px;
+    border-radius: 7px;
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.5px;
-    min-width: 64px;
-    max-width: 64px;
-    min-height: 32px;
-    max-height: 32px;
+    min-width: 58px;
+    max-width: 58px;
+    min-height: 30px;
+    max-height: 30px;
     padding: 0px;
 }}
 QPushButton#themeToggle:hover {{
@@ -434,9 +447,9 @@ QPushButton#themeToggle:hover {{
     color: {INK};
 }}
 QPushButton#themeToggle:checked {{
-    background: {ACCENT};
-    color: #FFFFFF;
-    border-color: {ACCENT};
+    background: {PRIMARY};
+    color: {ON_PRIMARY};
+    border-color: {PRIMARY};
 }}
 
 /* ── Bottom status bar ──────────────────────────────────────────────────── */
@@ -484,7 +497,7 @@ QScrollBar::handle:vertical {{
     border-radius: 3px;
     min-height: 20px;
 }}
-QScrollBar::handle:vertical:hover {{ background: {MUTED}; }}
+QScrollBar::handle:vertical:hover {{ background: {ACCENT}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
 QScrollBar:horizontal {{
     background: {SURF};
@@ -495,13 +508,112 @@ QScrollBar::handle:horizontal {{
     background: #BDBDBD;
     border-radius: 3px;
 }}
-QScrollBar::handle:horizontal:hover {{ background: {MUTED}; }}
+QScrollBar::handle:horizontal:hover {{ background: {ACCENT}; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
+
+/* ── Dock widget titles ─────────────────────────────────────────────────── */
+QDockWidget::title {{
+    background: {SURF};
+    border-bottom: 2px solid {ACCENT};
+    padding: 7px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: {INK};
+}}
+
+/* ── Log panel ──────────────────────────────────────────────────────────── */
+#logPanel {{ background: {BG}; }}
+QPlainTextEdit#logView {{
+    background: {BG};
+    color: {INK};
+    border: none;
+    font-family: 'Cascadia Mono', 'Consolas', 'IBM Plex Mono', 'Fira Code', monospace;
+    font-size: 11px;
+}}
 
 /* ── Message boxes ──────────────────────────────────────────────────────── */
 QMessageBox {{ background: {BG}; }}
 QMessageBox QLabel {{ color: {INK}; }}
 QPushButton#qt_msgbox_buttonbox {{ background: {BG}; }}
+
+/* ── Preset buttons ─────────────────────────────────────────────────────── */
+QPushButton#presetBtn {{
+    background: {SURF};
+    color: {INK};
+    border: 1px solid {BORDER};
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 10px;
+    min-height: 26px;
+}}
+QPushButton#presetBtn:hover {{
+    background: {HOVER};
+    border-color: {INK};
+}}
+QPushButton#presetBtn:pressed {{
+    background: {SURF};
+    color: {MUTED};
+}}
+
+/* ── Figure tab bar ─────────────────────────────────────────────────────── */
+#figureTabBar {{
+    background: {SURF2};
+    border-bottom: 1px solid {BORDER};
+    padding: 4px 8px;
+}}
+QPushButton#figureTab {{
+    background: transparent;
+    color: {MUTED};
+    border: 1px solid transparent;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 20px;
+    min-height: 26px;
+    min-width: 72px;
+    text-align: center;
+}}
+QPushButton#figureTab:checked {{
+    background: {HOVER};
+    color: {INK};
+    border-color: {BORDER};
+}}
+QPushButton#figureTab:hover:!checked {{
+    color: {INK};
+    border-color: {BORDER};
+    background: {HOVER};
+}}
+QPushButton#figureTabClose {{
+    background: transparent;
+    color: {MUTED};
+    border: none;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 4px;
+    max-width: 16px;
+    min-width: 16px;
+}}
+QPushButton#figureTabClose:hover {{
+    background: {HOVER};
+    color: {INK};
+}}
+QPushButton#figureAddBtn {{
+    background: transparent;
+    color: {MUTED};
+    border: 1px dashed {BORDER};
+    border-radius: 5px;
+    font-size: 14px;
+    font-weight: 400;
+    padding: 1px 10px;
+    min-height: 24px;
+}}
+QPushButton#figureAddBtn:hover {{
+    color: {INK};
+    border-color: {INK};
+    border-style: solid;
+}}
 """
 
 

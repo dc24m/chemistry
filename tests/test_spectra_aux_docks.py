@@ -17,12 +17,12 @@ def qapp():
 
 
 class AuxDockTest(unittest.TestCase):
-    def test_layers_and_log_docks_exist(self):
+    def test_log_dock_exists_without_unfinished_layers_pane(self):
         qapp()
         win = spectra_app.MainWindow()
         names = {d.objectName() for d in win.findChildren(QDockWidget)}
-        self.assertIn("dock_layers", names)
         self.assertIn("dock_log", names)
+        self.assertNotIn("dock_layers", names)
 
     def test_log_appends_status_messages(self):
         qapp()
@@ -30,16 +30,11 @@ class AuxDockTest(unittest.TestCase):
         win._status_message("Hello log")
         self.assertIn("Hello log", win.log_dock.text())
 
-    def test_layers_reflects_trace_rows_without_plotting(self):
+    def test_window_does_not_expose_layers_panel_api(self):
         qapp()
         win = spectra_app.MainWindow()
-        rows = [
-            {"label": "Sample A", "color": "#F472B6", "visible": True},
-            {"label": "Sample B", "color": "#38BDF8", "visible": False},
-        ]
-        win.layers_dock.set_rows(rows)
-        self.assertEqual(win.layers_dock.row_count(), 2)
-        self.assertEqual(win.layers_dock.label_at(0), "Sample A")
+        self.assertFalse(hasattr(win, "layers_dock"))
+        self.assertFalse(hasattr(spectra_app, "LayersPanel"))
 
 
 if __name__ == "__main__":
