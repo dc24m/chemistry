@@ -1,0 +1,64 @@
+name: Build SPECTRAplot
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # lets you trigger a build manually from GitHub
+
+jobs:
+
+  # ── macOS build ─────────────────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pyinstaller numpy matplotlib PyQt6
+
+      - name: Build
+        run: pyinstaller SPECTRAplot.spec
+
+      - name: Zip app
+        run: cd dist && zip -r SPECTRAplot-mac.zip SPECTRAplot.app
+
+      - name: Upload mac build
+        uses: actions/upload-artifact@v4
+        with:
+          name: SPECTRAplot-mac
+          path: dist/SPECTRAplot-mac.zip
+          retention-days: 30
+
+  # ── Windows build ────────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pyinstaller numpy matplotlib PyQt6 pillow
+
+      - name: Convert icon to .ico
+        run: python -c "from PIL import Image; img = Image.open('icon.png'); img.save('assets/icon.ico')"
+
+      - name: Build
+        run: pyinstaller SPECTRAplot.spec
+
+      - name: Zip Windows build
+        run: Compress-Archive -Path dist/SPECTRAplot -DestinationPath dist/SPECTRAplot-windows.zip
+        shell: pwsh
+
+      - name: Upload windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: SPECTRAplot-windows
+          path: dist/SPECTRAplot-windows.zip
+          retention-days: 30
