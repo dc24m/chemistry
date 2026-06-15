@@ -22,6 +22,8 @@ jobs:
 
       - name: Build
         run: pyinstaller SPECTRAplot.spec
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
 
       - name: Zip app
         run: cd dist && zip -r SPECTRAplot-mac.zip SPECTRAplot.app
