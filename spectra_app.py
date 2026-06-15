@@ -10,6 +10,12 @@ import re
 import json
 from dataclasses import dataclass
 
+
+def resource_path(*parts) -> str:
+    """Return absolute path to a bundled resource (works frozen via PyInstaller or from source)."""
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
+
 try:
     import numpy as np
 
@@ -47,6 +53,7 @@ except ModuleNotFoundError as exc:
 import spectra_theme
 from spectra_theme import (
     MODES, MODE_BY_KEY, darken, add_shadow, build_style, s, init_ui_scale,
+    set_ui_font,
 )
 
 matplotlib.rcParams.update({
@@ -353,6 +360,9 @@ class FigureState:
     editor: object
     mode:   str
     label:  str
+    # Snapshot of the control panel's data inputs (traces, IV sweeps, XRD refs)
+    # for this figure, so switching tabs restores what was loaded. None = empty.
+    data:   dict = None
 
 
 class FigureTabBar(QWidget):
@@ -513,8 +523,7 @@ class TopHeader(QWidget):
         lay.setSpacing(0)
 
         # ── Logo image (assets/logo.png, optional)
-        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 'assets', 'logo.png')
+        logo_path = resource_path('assets', 'logo.png')
         if os.path.isfile(logo_path):
             logo_lbl = QLabel()
             logo_lbl.setObjectName('logoImg')
@@ -570,7 +579,7 @@ class TopHeader(QWidget):
         lay.addWidget(self.btn_theme)
 
     def _set_title_colors(self, ink: str, muted: str):
-        ff = self._TITLE_FF
+        ff = spectra_theme.UI_FONT_FAMILY
         self._title_lbl.setText(
             f'<span style="font-family:{ff};font-size:{s(30)}px;font-weight:800;'
             f'letter-spacing:0;color:{ink};">SPECTRA</span>'
@@ -765,7 +774,7 @@ class PanelFileWidget(QWidget):
             row = QHBoxLayout()
             row.setSpacing(s(8))
             lbl = QLabel(label_text)
-            lbl.setFixedWidth(s(78))
+            lbl.setFixedWidth(s(96))
             lbl.setObjectName('fieldlbl')
             btn = ColorButton(default)
             btn.color_changed.connect(lambda _: self.changed.emit())
@@ -817,6 +826,12 @@ class PanelFileWidget(QWidget):
         if rows:
             self.changed.emit()
 
+    def clear(self):
+        """Drop every trace from this panel. Used to give a freshly added
+        figure an empty data box (does not emit `changed`)."""
+        self.lst.clear()
+        self.traces.clear()
+
     def _edit_double(self, item):
         self._edit_trace(self.lst.row(item))
 
@@ -846,6 +861,33 @@ class PanelFileWidget(QWidget):
 
     def use_gradient(self) -> bool:
         return self.chk_gradient.isChecked()
+
+    def get_state(self) -> dict:
+        """Snapshot this panel for per-figure persistence. Trace dicts are kept
+        by reference (each belongs to one figure) so in-place edits survive."""
+        return {
+            'traces': list(self.traces),
+            'gradient': (self.c_top.hex(), self.c_bot.hex()),
+            'use_gradient': self.chk_gradient.isChecked(),
+        }
+
+    def set_state(self, st: dict):
+        """Repopulate this panel from a get_state() snapshot, without emitting
+        `changed` (the caller triggers a single refresh)."""
+        self.clear()
+        g = st.get('gradient', ('#000000', '#000000'))
+        self.c_top.set_hex(g[0])
+        self.c_bot.set_hex(g[1])
+        self.chk_gradient.blockSignals(True)
+        self.chk_gradient.setChecked(st.get('use_gradient', True))
+        self.chk_gradient.blockSignals(False)
+        self._toggle_gradient(self.chk_gradient.isChecked())
+        for tr in st.get('traces', []):
+            self.traces.append(tr)
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, 30))
+            self.lst.addItem(item)
+            self.lst.setItemWidget(item, _TraceRow(tr, self.changed.emit))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -951,6 +993,25 @@ class IVDataSetWidget(QWidget):
             self.pos_path = ''
         self._refresh_sweep_labels()
 
+    def clear(self):
+        """Forget both sweep CSVs so a freshly added figure starts empty."""
+        self.neg_path = ''
+        self.pos_path = ''
+        self._refresh_sweep_labels()
+
+    def get_state(self) -> dict:
+        return {'name': self.edit_name.text(), 'color': self.color.hex(),
+                'neg_path': self.neg_path, 'pos_path': self.pos_path}
+
+    def set_state(self, st: dict):
+        self.edit_name.blockSignals(True)
+        self.edit_name.setText(st.get('name', ''))
+        self.edit_name.blockSignals(False)
+        self.color.set_hex(st.get('color', self.color.hex()))
+        self.neg_path = st.get('neg_path', '')
+        self.pos_path = st.get('pos_path', '')
+        self._refresh_sweep_labels()
+
     def display_name(self) -> str:
         return self.edit_name.text().strip() or f'Set {self.index + 1}'
 
@@ -963,7 +1024,7 @@ class IVDataSetWidget(QWidget):
         }
 
 
-def _labeled(label_text: str, widget: QWidget, lw: int = 74) -> QHBoxLayout:
+def _labeled(label_text: str, widget: QWidget, lw: int = 90) -> QHBoxLayout:
     r = QHBoxLayout()
     r.setSpacing(s(8))
     lbl = QLabel(label_text)
@@ -1076,7 +1137,7 @@ class ControlPanel(QScrollArea):
         agl.setSpacing(s(9))
 
         xrow = QHBoxLayout(); xrow.setSpacing(s(5))
-        xl = QLabel('X range'); xl.setFixedWidth(s(52)); xl.setObjectName('fieldlbl')
+        xl = QLabel('X range'); xl.setFixedWidth(s(66)); xl.setObjectName('fieldlbl')
         self.spin_xmin = FlatDoubleSpinBox()
         self.spin_xmax = FlatDoubleSpinBox()
         for sb in (self.spin_xmin, self.spin_xmax):
@@ -1110,7 +1171,7 @@ class ControlPanel(QScrollArea):
         self.chk_pauto_x.toggled.connect(self._toggle_panel_xlim)
         agl.addWidget(self.chk_pauto_x)
         pxrow = QHBoxLayout(); pxrow.setSpacing(s(5))
-        pxl = QLabel('X range'); pxl.setFixedWidth(s(52)); pxl.setObjectName('fieldlbl')
+        pxl = QLabel('X range'); pxl.setFixedWidth(s(66)); pxl.setObjectName('fieldlbl')
         self.spin_pxmin = FlatDoubleSpinBox()
         self.spin_pxmax = FlatDoubleSpinBox()
         for sb in (self.spin_pxmin, self.spin_pxmax):
@@ -1131,7 +1192,7 @@ class ControlPanel(QScrollArea):
         agl.addWidget(_sep())
 
         yrow = QHBoxLayout(); yrow.setSpacing(s(5))
-        yl = QLabel('Y range'); yl.setFixedWidth(s(52)); yl.setObjectName('fieldlbl')
+        yl = QLabel('Y range'); yl.setFixedWidth(s(66)); yl.setObjectName('fieldlbl')
         self.spin_ymin = FlatDoubleSpinBox()
         self.spin_ymax = FlatDoubleSpinBox()
         for sb in (self.spin_ymin, self.spin_ymax):
@@ -1199,7 +1260,7 @@ class ControlPanel(QScrollArea):
         sgl.addWidget(_sep())
 
         fw_row = QHBoxLayout(); fw_row.setSpacing(s(5))
-        fw_lbl = QLabel('Size (px)'); fw_lbl.setFixedWidth(s(52)); fw_lbl.setObjectName('fieldlbl')
+        fw_lbl = QLabel('Size (px)'); fw_lbl.setFixedWidth(s(66)); fw_lbl.setObjectName('fieldlbl')
         self.spin_fw = FlatSpinBox()
         self.spin_fh = FlatSpinBox()
         for sb in (self.spin_fw, self.spin_fh):
@@ -1611,6 +1672,126 @@ class ControlPanel(QScrollArea):
                                   self.spin_fw.value() / 100, self.spin_fh.value() / 100)
             except Exception as e:
                 QMessageBox.critical(self, 'Save Error', str(e))
+
+    def reset_data(self):
+        """Clear every loaded data source (traces, IV sweeps, XRD references)
+        so a freshly added figure starts with an empty data box. Style settings
+        are intentionally left untouched."""
+        for pw in self.panel_widgets:
+            pw.clear()
+        for iv in self.iv_widgets:
+            iv.clear()
+        self.xrd_ref_paths.clear()
+        self.xrd_ref_list.clear()
+
+    def capture_data(self) -> dict:
+        """Snapshot a figure's full state — data AND style — so reselecting its
+        tab restores everything. Style reuses the preset machinery; axes and
+        labels (not part of presets) are captured here too."""
+        self._flush_xpanel()
+        return {
+            # ── Data ──
+            'n_panels': self.spin_panels.value(),
+            'panels': [pw.get_state() for pw in self.panel_widgets],
+            'n_iv': self.spin_iv_sets.value(),
+            'iv': [iv.get_state() for iv in self.iv_widgets],
+            'xrd_refs': list(self.xrd_ref_paths),
+            # ── Style (Plot Style dock + graph appearance) ──
+            'style': self._style_preset(),
+            # ── Axes (Build panel) ──
+            'axis': {
+                'auto_x': self.chk_auto_x.isChecked(),
+                'x_min': self.spin_xmin.value(),
+                'x_max': self.spin_xmax.value(),
+                'separate_x': self.chk_separate_x.isChecked(),
+                'panel_x': [dict(d) for d in self._panel_x],
+                'xpanel_idx': self._xpanel_idx,
+                'auto_y': self.chk_auto_y.isChecked(),
+                'y_min': self.spin_ymin.value(),
+                'y_max': self.spin_ymax.value(),
+                'share_y': self.chk_share_y.isChecked(),
+                'panel_gap': self.spin_gap.value(),
+            },
+            # ── Labels (Build panel) ──
+            'titles': {
+                'show_main': self.chk_main_title.isChecked(),
+                'main': self.edit_main_title.text(),
+                'show_sub': self.chk_subtitle.isChecked(),
+                'sub': self.edit_subtitle.text(),
+                'show_panel': self.chk_panel_titles.isChecked(),
+                'panel': self.edit_panel_titles.text(),
+            },
+        }
+
+    def restore_data(self, snap: dict):
+        """Reload a figure's full state from a capture_data() snapshot. A falsy
+        snapshot (e.g. a brand-new figure) resets to an empty data box while
+        leaving style at its defaults."""
+        if not snap:
+            self.reset_data()
+            return
+
+        def _val(w, v):
+            w.blockSignals(True); w.setValue(v); w.blockSignals(False)
+
+        def _chk(w, v):
+            w.blockSignals(True); w.setChecked(bool(v)); w.blockSignals(False)
+
+        def _txt(w, v):
+            w.blockSignals(True); w.setText(v); w.blockSignals(False)
+
+        # ── Data ──
+        _val(self.spin_panels, snap.get('n_panels', 1))
+        self._on_panels_change(self.spin_panels.value())
+        for pw, st in zip(self.panel_widgets, snap.get('panels', [])):
+            pw.set_state(st)
+        _val(self.spin_iv_sets, snap.get('n_iv', self.spin_iv_sets.value()))
+        self._on_iv_sets_change(self.spin_iv_sets.value())
+        for iv, st in zip(self.iv_widgets, snap.get('iv', [])):
+            iv.set_state(st)
+        self.xrd_ref_paths = list(snap.get('xrd_refs', []))
+        self.xrd_ref_list.clear()
+        for p in self.xrd_ref_paths:
+            self.xrd_ref_list.addItem(clean_label(os.path.basename(p)))
+
+        # ── Style ──
+        self._apply_style_preset(snap.get('style', {}))
+
+        # ── Axes ──
+        a = snap.get('axis', {})
+        _chk(self.chk_auto_x, a.get('auto_x', True))
+        _val(self.spin_xmin, a.get('x_min', 400.0))
+        _val(self.spin_xmax, a.get('x_max', 800.0))
+        _chk(self.chk_separate_x, a.get('separate_x', False))
+        self._panel_x = [dict(d) for d in a.get('panel_x', self._panel_x)]
+        self._xpanel_idx = a.get('xpanel_idx', 0)
+        self.combo_xpanel.blockSignals(True)
+        self.combo_xpanel.setCurrentIndex(self._xpanel_idx)
+        self.combo_xpanel.blockSignals(False)
+        _chk(self.chk_auto_y, a.get('auto_y', True))
+        _val(self.spin_ymin, a.get('y_min', 0.0))
+        _val(self.spin_ymax, a.get('y_max', 1.0))
+        _chk(self.chk_share_y, a.get('share_y', True))
+        _val(self.spin_gap, a.get('panel_gap', 0.30))
+
+        # ── Labels ──
+        t = snap.get('titles', {})
+        _chk(self.chk_main_title, t.get('show_main', False))
+        _txt(self.edit_main_title, t.get('main', ''))
+        _chk(self.chk_subtitle, t.get('show_sub', False))
+        _txt(self.edit_subtitle, t.get('sub', ''))
+        _chk(self.chk_panel_titles, t.get('show_panel', True))
+        _txt(self.edit_panel_titles, t.get('panel', ''))
+
+        # Refresh enable/visibility states that the blocked setters skipped.
+        self._toggle_separate_x(self.chk_separate_x.isChecked())
+        self._toggle_xlim()
+        self._toggle_ylim()
+        self._toggle_sci()
+        self._toggle_manual_box(self.chk_manual_box.isChecked())
+        self._toggle_legend()
+        if not self.chk_separate_x.isChecked():
+            self._load_xpanel(self._xpanel_idx)
 
     # ── Settings export ────────────────────────────────────────────────────────
 
@@ -3036,6 +3217,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._apply_dock_sizes)
 
         self._has_plotted = False
+        self._suppress_replot = False
         self._plot_called_for_test = False
         self.controls.plot_requested.connect(self._do_plot)
         self.controls.live_update_requested.connect(self._auto_replot)
@@ -3079,14 +3261,26 @@ class MainWindow(QMainWindow):
     def _switch_figure(self, idx: int):
         if idx < 0 or idx >= len(self._figure_states):
             return
+        # Save the outgoing figure's data before swapping the shared data box.
+        if 0 <= self._active_fig_idx < len(self._figure_states):
+            self._figure_states[self._active_fig_idx].data = self.controls.capture_data()
         self._active_fig_idx = idx
         state = self._figure_states[idx]
         self.canvas_stack.setCurrentIndex(idx)
         self.figure_tab_bar.set_active(idx)
         self.controls._canvas = state.canvas
         self._on_mode_change(state.mode)
+        # Restore this figure's data. The canvas already holds its last render,
+        # so suppress live-replots while the data box is repopulated.
+        self._suppress_replot = True
+        try:
+            self.controls.restore_data(state.data)
+        finally:
+            self._suppress_replot = False
 
     def _on_add_figure(self):
+        # A new figure carries no data; _switch_figure restores its empty state
+        # while preserving the previous figure's traces.
         idx = self._add_figure_state(mode=self._current_mode)
         self._switch_figure(idx)
 
@@ -3097,6 +3291,9 @@ class MainWindow(QMainWindow):
         self.canvas_stack.removeWidget(state.canvas)
         state.canvas.deleteLater()
         self.figure_tab_bar.remove_figure(idx)
+        # The closed figure's data is discarded with it — mark "no active figure"
+        # so the upcoming switch doesn't capture it back into a surviving tab.
+        self._active_fig_idx = -1
         self._switch_figure(min(idx, len(self._figure_states) - 1))
 
     def _apply_dock_sizes(self):
@@ -3279,6 +3476,8 @@ class MainWindow(QMainWindow):
     def _auto_replot(self):
         """Live-refresh the figure after a trace/legend change — but only once a
         plot already exists, and without popping the 'No Data' / error dialogs."""
+        if self._suppress_replot:
+            return
         if self._has_plotted:
             self._do_plot(silent=True)
 
@@ -3325,12 +3524,26 @@ class MainWindow(QMainWindow):
 
 def _load_bundled_fonts():
     """Load Montserrat (and any other bundled fonts) from assets/ if present."""
-    assets = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
     for fname in ('Montserrat-ExtraBold.ttf', 'Montserrat-Light.ttf',
                   'Montserrat-Bold.ttf', 'Montserrat-Regular.ttf'):
-        path = os.path.join(assets, fname)
+        path = resource_path('assets', fname)
         if os.path.isfile(path):
             QFontDatabase.addApplicationFont(path)
+
+
+def _load_ui_font() -> str:
+    """Register the bundled Google Sans font (project root) and return its
+    family name, or '' if unavailable."""
+    family = ''
+    for fname in ('GoogleSans-VariableFont_GRAD,opsz,wght.ttf',
+                  'GoogleSans-Italic-VariableFont_GRAD,opsz,wght.ttf'):
+        path = resource_path(fname)
+        if os.path.isfile(path):
+            fid = QFontDatabase.addApplicationFont(path)
+            fams = QFontDatabase.applicationFontFamilies(fid)
+            if fams and not family:
+                family = fams[0]
+    return family
 
 
 def main():
@@ -3342,8 +3555,11 @@ def main():
     app.setStyle('Fusion')
     init_ui_scale(app)
     _load_bundled_fonts()
+    ui_font = _load_ui_font()
+    if ui_font:
+        set_ui_font(ui_font)
     app.setStyleSheet(build_style(MODES[0]['accent'], False, spectra_theme.UI_SCALE))
-    app.setFont(QFont('Segoe UI', s(9)))
+    app.setFont(QFont(ui_font or 'Segoe UI', s(9)))
     splash = create_loading_screen()
     splash.show()
     app.processEvents()

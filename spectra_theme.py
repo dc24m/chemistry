@@ -41,6 +41,10 @@ UI_SCALE = 1.0  # set at startup by init_ui_scale()
 # to make the whole interface larger/smaller without touching anything else.
 UI_BOOST = 1.25
 
+# Flat px added to every QSS font-size (before UI_SCALE), so text reads larger
+# without enlarging layout dimensions. Raise/lower to taste.
+UI_FONT_BOOST = 2
+
 
 def init_ui_scale(app, base=(2560, 1440)) -> float:
     """Derive a global UI scale from the primary screen vs the 1440p design
@@ -54,6 +58,22 @@ def init_ui_scale(app, base=(2560, 1440)) -> float:
     except Exception:
         UI_SCALE = UI_BOOST
     return UI_SCALE
+
+
+# ── UI font ───────────────────────────────────────────────────────────────────
+# The application font stack. set_ui_font() prepends a freshly loaded family
+# (e.g. bundled Google Sans) so build_style() and chrome text pick it up.
+_FONT_FALLBACK = ("'Segoe UI Variable', 'Segoe UI', 'IBM Plex Sans', 'Inter', "
+                  "system-ui, sans-serif")
+UI_FONT_FAMILY = _FONT_FALLBACK
+
+
+def set_ui_font(family: str):
+    """Make `family` the primary UI font, keeping the existing stack as fallback.
+    Call before the first build_style() so the stylesheet cache picks it up."""
+    global UI_FONT_FAMILY
+    if family:
+        UI_FONT_FAMILY = f"'{family}', {_FONT_FALLBACK}"
 
 
 def s(px):
@@ -119,10 +139,11 @@ def build_style(_accent: str, dark: bool = False, scale: float = 1.0) -> str:
         ACCENT_FILL = f'rgba({_fr},{_fg},{_fb},0.12)'  # faint accent for tab hover
     except Exception:
         ACCENT_FILL = SURF
+    FONT = UI_FONT_FAMILY
     qss = f"""
 /* ── Global reset ───────────────────────────────────────────────────────── */
 * {{
-    font-family: 'Segoe UI Variable', 'Segoe UI', 'IBM Plex Sans', 'Inter', system-ui, sans-serif;
+    font-family: {FONT};
     font-size: 12px;
     color: {INK};
 }}
@@ -652,6 +673,13 @@ QPushButton#figureAddBtn:hover {{
     border-style: solid;
 }}
 """
+    # Bump every font-size by a flat amount (layout dimensions untouched) so UI
+    # text reads a little larger without changing the overall UI scale.
+    if UI_FONT_BOOST:
+        qss = re.sub(
+            r'(font-size:\s*)(\d+(?:\.\d+)?)px',
+            lambda m: f'{m.group(1)}{round(float(m.group(2)) + UI_FONT_BOOST, 2)}px',
+            qss)
     if scale != 1.0:
         qss = re.sub(r'(\d+(?:\.\d+)?)px',
                      lambda m: f'{round(float(m.group(1)) * scale, 2)}px', qss)

@@ -9,6 +9,7 @@
 #   macOS  → dist/SPECTRAplot.app
 #   Windows → dist/SPECTRAplot/SPECTRAplot.exe
 
+import os
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # ── data files to bundle ─────────────────────────────────────────────────────
@@ -16,9 +17,9 @@ datas = [
     # logo  (src, dest-folder-inside-bundle)
     ('assets/logo.png',                                            'assets'),
 
-    # Google Sans fonts (project root → bundle root so resource_path(fname) works)
-    ('GoogleSans-VariableFont_GRAD,opsz,wght.ttf',                '.'),
-    ('GoogleSans-Italic-VariableFont_GRAD,opsz,wght.ttf',         '.'),
+    # Google Sans fonts (only bundled if present — app falls back to system font otherwise)
+    *([('GoogleSans-VariableFont_GRAD,opsz,wght.ttf', '.')] if os.path.isfile('GoogleSans-VariableFont_GRAD,opsz,wght.ttf') else []),
+    *([('GoogleSans-Italic-VariableFont_GRAD,opsz,wght.ttf', '.')] if os.path.isfile('GoogleSans-Italic-VariableFont_GRAD,opsz,wght.ttf') else []),
 
     # matplotlib needs its own data (mpl-data: fonts, matplotlibrc, etc.)
     *collect_data_files('matplotlib'),
