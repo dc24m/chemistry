@@ -1,39 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
-#
-# SPECTRAplot PyInstaller spec
-#
-# Build (macOS):   pyinstaller SPECTRAplot.spec
-# Build (Windows): pyinstaller SPECTRAplot.spec   (run this on a Windows machine)
-#
-# Output lands in dist/
-#   macOS  → dist/SPECTRAplot.app
-#   Windows → dist/SPECTRAplot/SPECTRAplot.exe
+import os, sys
+from PyInstaller.utils.hooks import collect_data_files
 
-import os
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
-
-# ── data files to bundle ─────────────────────────────────────────────────────
+# ── data files ───────────────────────────────────────────────────────────────
 datas = [
-    # logo  (src, dest-folder-inside-bundle)
-    ('assets/logo.png',                                            'assets'),
-
-    # Google Sans fonts (only bundled if present — app falls back to system font otherwise)
+    ('assets/logo.png', 'assets'),
     *([('GoogleSans-VariableFont_GRAD,opsz,wght.ttf', '.')] if os.path.isfile('GoogleSans-VariableFont_GRAD,opsz,wght.ttf') else []),
     *([('GoogleSans-Italic-VariableFont_GRAD,opsz,wght.ttf', '.')] if os.path.isfile('GoogleSans-Italic-VariableFont_GRAD,opsz,wght.ttf') else []),
-
-    # matplotlib needs its own data (mpl-data: fonts, matplotlibrc, etc.)
-    *collect_data_files('matplotlib'),
-
-    # numpy data files
-    *collect_data_files('numpy'),
+    *collect_data_files('matplotlib'),   # mpl-data: fonts, matplotlibrc, etc.
 ]
 
-# ── hidden imports matplotlib/PyQt6 need ────────────────────────────────────
+# ── only the hidden imports that PyInstaller genuinely misses ────────────────
 hiddenimports = [
     'matplotlib.backends.backend_qtagg',
     'matplotlib.backends.backend_agg',
-    *collect_submodules('matplotlib'),
-    *collect_submodules('numpy'),
     'PyQt6.QtPrintSupport',
 ]
 
@@ -48,16 +28,44 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'tkinter', '_tkinter',   # not used, saves ~10 MB
-        'IPython', 'jupyter',
+        # never used
+        'tkinter', '_tkinter',
+        'IPython', 'jupyter', 'notebook',
+        'scipy', 'pandas', 'PIL', 'pillow',
+        # test/dev modules
+        'matplotlib.tests', 'matplotlib.testing',
+        'numpy.testing', 'numpy.tests', 'numpy.f2py',
+        # unused Qt modules (big savings)
+        'PyQt6.QtNetwork', 'PyQt6.QtBluetooth', 'PyQt6.QtNfc',
+        'PyQt6.Qt3DCore', 'PyQt6.Qt3DRender', 'PyQt6.Qt3DInput',
+        'PyQt6.Qt3DLogic', 'PyQt6.Qt3DAnimation', 'PyQt6.Qt3DExtras',
+        'PyQt6.QtCharts', 'PyQt6.QtDataVisualization',
+        'PyQt6.QtMultimedia', 'PyQt6.QtMultimediaWidgets',
+        'PyQt6.QtLocation', 'PyQt6.QtPositioning',
+        'PyQt6.QtQuick', 'PyQt6.QtQuickWidgets', 'PyQt6.QtQuickControls2',
+        'PyQt6.QtSensors', 'PyQt6.QtSql', 'PyQt6.QtTest',
+        'PyQt6.QtWebEngineCore', 'PyQt6.QtWebEngineWidgets', 'PyQt6.QtWebEngineQuick',
+        'PyQt6.QtWebSockets', 'PyQt6.QtXml',
+        'PyQt6.QtDBus', 'PyQt6.QtDesigner', 'PyQt6.QtHelp',
+        'PyQt6.QtRemoteObjects', 'PyQt6.QtSerialPort', 'PyQt6.QtStateMachine',
     ],
     noarchive=False,
-    optimize=0,
+    optimize=1,
 )
+
+# ── strip unused Qt binaries that slipped through ────────────────────────────
+_qt_drop = {
+    'qtwebengine', 'qtnetwork', 'qt3d', 'qtcharts', 'qtdatavisualization',
+    'qtmultimedia', 'qtlocation', 'qtpositioning', 'qtquick', 'qtsensors',
+    'qtsql', 'qttest', 'qtwebsockets', 'qtxml', 'qtdbus', 'qtdesigner',
+    'qthelp', 'qtbluetooth', 'qtnfc', 'qtremoteobjects', 'qtserialport',
+    'qtstatemachine', 'permissionplugin',
+}
+a.binaries = [b for b in a.binaries
+              if not any(k in b[0].lower() for k in _qt_drop)]
 
 pyz = PYZ(a.pure)
 
-import sys, os
 _icon = ('assets/icon.icns' if sys.platform == 'darwin'
          else 'assets/icon.ico' if os.path.isfile('assets/icon.ico')
          else None)
@@ -72,6 +80,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
+    upx_exclude=[],
     console=False,
     icon=_icon,
 )
@@ -86,13 +95,11 @@ coll = COLLECT(
     name='SPECTRAplot',
 )
 
-# ── macOS: wrap into a .app bundle ───────────────────────────────────────────
-import sys
 if sys.platform == 'darwin':
     app = BUNDLE(
         coll,
         name='SPECTRAplot.app',
-        icon='assets/icon.icns',
+        icon=_icon,
         bundle_identifier='com.spectraplot.app',
         info_plist={
             'NSHighResolutionCapable': True,
