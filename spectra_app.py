@@ -3110,9 +3110,29 @@ def create_loading_screen() -> QSplashScreen:
     subtitle.setObjectName('loadingSubtitle')
     subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-    status = QLabel('Preparing plotting workspace...')
+    status = QLabel('preparing plotting workspace...')
     status.setObjectName('loadingStatus')
     status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    # cycle through a few (lowercase) loading quips while the splash is up
+    _quips = [
+        'preparing plotting workspace...',
+        'calibrating the diffractometer...',
+        "summoning bragg's law...",
+        'aligning the x-rays (do not look directly)...',
+        'fitting gaussians nobody asked for...',
+        'bribing matplotlib to cooperate...',
+    ]
+    _qi = {'i': 0}
+
+    def _next_quip():
+        _qi['i'] = (_qi['i'] + 1) % len(_quips)
+        status.setText(_quips[_qi['i']])
+
+    _quip_timer = QTimer(splash)
+    _quip_timer.timeout.connect(_next_quip)
+    _quip_timer.start(1700)
+    splash._quip_timer = _quip_timer   # keep a reference so it isn't GC'd
 
     progress = QProgressBar()
     progress.setObjectName('loadingProgress')
@@ -3625,6 +3645,8 @@ def main():
     _remaining = max(0, 10000 - _elapsed_ms)
 
     def _reveal():
+        if hasattr(splash, '_quip_timer'):
+            splash._quip_timer.stop()
         win.showMaximized()
         splash.finish(win)
 
