@@ -6,6 +6,7 @@ from PyInstaller.utils.hooks import collect_data_files
 datas = [
     ('qt.conf', '.'),          # tells Qt where Data/Plugins live so it skips CFBundleCopyBundleURL (macOS 26 PAC crash fix)
     ('assets/logo.png', 'assets'),
+    ('assets/loading.png', 'assets'),
     *([('GoogleSans-VariableFont_GRAD,opsz,wght.ttf', '.')] if os.path.isfile('GoogleSans-VariableFont_GRAD,opsz,wght.ttf') else []),
     *([('GoogleSans-Italic-VariableFont_GRAD,opsz,wght.ttf', '.')] if os.path.isfile('GoogleSans-Italic-VariableFont_GRAD,opsz,wght.ttf') else []),
     *collect_data_files('matplotlib'),   # mpl-data: fonts, matplotlibrc, etc.

@@ -8,6 +8,7 @@ import sys
 import os
 import re
 import json
+import time
 from dataclasses import dataclass
 
 
@@ -3064,7 +3065,7 @@ def do_plot(fig: Figure, s: dict) -> str:
 # ── Main window ───────────────────────────────────────────────────────────────
 
 def create_loading_screen() -> QSplashScreen:
-    pixmap = QPixmap(s(440), s(240))
+    pixmap = QPixmap(s(480), s(430))
     pixmap.fill(QColor('#FFFFFF'))
 
     splash = QSplashScreen(pixmap)
@@ -3073,8 +3074,19 @@ def create_loading_screen() -> QSplashScreen:
     splash.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
     layout = QVBoxLayout(splash)
-    layout.setContentsMargins(s(34), s(30), s(34), s(28))
+    layout.setContentsMargins(s(34), s(26), s(34), s(28))
     layout.setSpacing(s(10))
+
+    # ── Hero image (assets/loading.png, optional)
+    img_path = resource_path('assets', 'loading.png')
+    if os.path.isfile(img_path):
+        img_lbl = QLabel()
+        img_lbl.setObjectName('loadingImage')
+        img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pix = QPixmap(img_path)
+        img_lbl.setPixmap(pix.scaledToWidth(s(412),
+            Qt.TransformationMode.SmoothTransformation))
+        layout.addWidget(img_lbl)
 
     title = QLabel('SPECTRAplot')
     title.setObjectName('loadingTitle')
@@ -3576,9 +3588,17 @@ def main():
     splash = create_loading_screen()
     splash.show()
     app.processEvents()
+    _t0 = time.monotonic()
     win = MainWindow()
-    win.showMaximized()
-    splash.finish(win)
+    # Keep the loading screen up for a fixed 10 s total (minus build time)
+    _elapsed_ms = int((time.monotonic() - _t0) * 1000)
+    _remaining = max(0, 10000 - _elapsed_ms)
+
+    def _reveal():
+        win.showMaximized()
+        splash.finish(win)
+
+    QTimer.singleShot(_remaining, _reveal)
     sys.exit(app.exec())
 
 
