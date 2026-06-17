@@ -3065,7 +3065,7 @@ def do_plot(fig: Figure, s: dict) -> str:
 # ── Main window ───────────────────────────────────────────────────────────────
 
 def create_loading_screen() -> QSplashScreen:
-    pixmap = QPixmap(s(480), s(430))
+    pixmap = QPixmap(s(760), s(620))
     pixmap.fill(QColor('#FFFFFF'))
 
     splash = QSplashScreen(pixmap)
@@ -3074,7 +3074,7 @@ def create_loading_screen() -> QSplashScreen:
     splash.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
     layout = QVBoxLayout(splash)
-    layout.setContentsMargins(s(34), s(26), s(34), s(28))
+    layout.setContentsMargins(s(40), s(30), s(40), s(28))
     layout.setSpacing(s(10))
 
     # ── Hero image (assets/loading.png, optional)
@@ -3083,9 +3083,14 @@ def create_loading_screen() -> QSplashScreen:
         img_lbl = QLabel()
         img_lbl.setObjectName('loadingImage')
         img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pix = QPixmap(img_path)
-        img_lbl.setPixmap(pix.scaledToWidth(s(412),
-            Qt.TransformationMode.SmoothTransformation))
+        # Render at the screen's native pixel density so it stays crisp on Retina
+        scr = QApplication.primaryScreen()
+        dpr = scr.devicePixelRatio() if scr else 1.0
+        target_w = s(680)
+        pix = QPixmap(img_path).scaledToWidth(
+            int(target_w * dpr), Qt.TransformationMode.SmoothTransformation)
+        pix.setDevicePixelRatio(dpr)
+        img_lbl.setPixmap(pix)
         layout.addWidget(img_lbl)
 
     title = QLabel('SPECTRAplot')
