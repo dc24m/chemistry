@@ -3131,6 +3131,21 @@ def create_loading_screen() -> QSplashScreen:
         'blaming everything on surface defects...',
         'pretending the peak shift is not thermal expansion...',
         'chasing a phase that is only metastable...',
+        # semiconductor
+        'pinning the fermi level where you need it...',
+        'passivating dangling bonds, mostly...',
+        'recombining carriers nonradiatively (rude)...',
+        'spin-coating until the wafer gives up...',
+        'tunneling through a barrier we promised was thick...',
+        'counting traps in the band gap...',
+        'blaming the mobility on the substrate...',
+        # polymer
+        'untangling polymer chains...',
+        'crosslinking past the point of no return...',
+        'glass transition pending, please wait...',
+        'curing the epoxy on your patience...',
+        'measuring a polydispersity we will not report...',
+        'degrading under uv, as designed...',
         # dark humour
         'absorbing more radiation than the sample...',
         'voiding the warranty on your dewar...',
