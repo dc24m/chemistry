@@ -47,7 +47,8 @@ a = Analysis(
         'PyQt6.QtSensors', 'PyQt6.QtSql', 'PyQt6.QtTest',
         'PyQt6.QtWebEngineCore', 'PyQt6.QtWebEngineWidgets', 'PyQt6.QtWebEngineQuick',
         'PyQt6.QtWebSockets', 'PyQt6.QtXml',
-        'PyQt6.QtDBus', 'PyQt6.QtDesigner', 'PyQt6.QtHelp',
+        # NOTE: QtDBus must NOT be excluded — QtGui links against it on macOS
+        'PyQt6.QtDesigner', 'PyQt6.QtHelp',
         'PyQt6.QtRemoteObjects', 'PyQt6.QtSerialPort', 'PyQt6.QtStateMachine',
     ],
     noarchive=False,
@@ -58,7 +59,7 @@ a = Analysis(
 _qt_drop = {
     'qtwebengine', 'qtnetwork', 'qt3d', 'qtcharts', 'qtdatavisualization',
     'qtmultimedia', 'qtlocation', 'qtpositioning', 'qtquick', 'qtsensors',
-    'qtsql', 'qttest', 'qtwebsockets', 'qtxml', 'qtdbus', 'qtdesigner',
+    'qtsql', 'qttest', 'qtwebsockets', 'qtxml', 'qtdesigner',
     'qthelp', 'qtbluetooth', 'qtnfc', 'qtremoteobjects', 'qtserialport',
     'qtstatemachine', 'permissionplugin',
 }
