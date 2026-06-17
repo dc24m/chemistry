@@ -3116,13 +3116,34 @@ def create_loading_screen() -> QSplashScreen:
 
     # cycle through a few (lowercase) loading quips while the splash is up
     _quips = [
-        'preparing plotting workspace...',
         'calibrating the diffractometer...',
         "summoning bragg's law...",
         'aligning the x-rays (do not look directly)...',
         'fitting gaussians nobody asked for...',
         'bribing matplotlib to cooperate...',
+        # material science
+        'annealing your grain boundaries...',
+        'indexing miller planes...',
+        'quenching the melt a little too fast...',
+        'refining the rietveld, ignoring the residuals...',
+        'measuring band gaps you cannot afford...',
+        'doping the lattice (academically)...',
+        'blaming everything on surface defects...',
+        'pretending the peak shift is not thermal expansion...',
+        'chasing a phase that is only metastable...',
+        # dark humour
+        'absorbing more radiation than the sample...',
+        'voiding the warranty on your dewar...',
+        'normalizing data until it agrees with the thesis...',
+        'this run will outlive your funding...',
+        'crystallizing slower than your phd...',
+        'the dosimeter is just decorative...',
+        'p-value shopping in progress...',
+        'cremating the sample in the muffle furnace...',
     ]
+    import random as _random
+    _random.shuffle(_quips)
+    _quips.insert(0, 'preparing plotting workspace...')   # always start here
     _qi = {'i': 0}
 
     def _next_quip():
