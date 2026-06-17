@@ -252,7 +252,7 @@ QPushButton#colorpick {{
 }}
 #appRoot {{ background: {BG}; }}
 QLabel#appTitle {{ color: {INK}; padding: 0 2px; }}
-QLabel#brandSub {{ color: {MUTED}; font-size: 12px; font-weight: 500; padding: 0 3px; }}
+QLabel#brandSub {{ color: {MUTED}; font-size: 12px; font-weight: 400; padding: 0 3px; }}
 
 /* ── Loading screen ─────────────────────────────────────────────────────── */
 #loadingScreen {{
