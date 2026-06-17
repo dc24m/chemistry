@@ -1420,6 +1420,12 @@ class ControlPanel(QScrollArea):
         self.spin_legend_fs.setRange(4.0, 40.0); self.spin_legend_fs.setSingleStep(1.0)
         self.spin_legend_fs.setDecimals(1); self.spin_legend_fs.setValue(16.0)
         lgll.addRow('Font size', self.spin_legend_fs)
+        self.spin_legend_spacing = FlatDoubleSpinBox()
+        self.spin_legend_spacing.setRange(0.0, 3.0); self.spin_legend_spacing.setSingleStep(0.05)
+        self.spin_legend_spacing.setDecimals(2); self.spin_legend_spacing.setValue(0.25)
+        lgll.addRow('Entry spacing', self.spin_legend_spacing)
+        self.chk_legend_2col = QCheckBox('2 columns')
+        lgll.addRow(self.chk_legend_2col)
 
         # ── Plot Box (axis box, tick-label padding, manual geometry, snap)
         g_box = QGroupBox('Plot Box')
@@ -1852,6 +1858,8 @@ class ControlPanel(QScrollArea):
             'legend_edge_color': self.color_legend_edge.hex(),
             'legend_edge_width': self.spin_legend_edge_w.value(),
             'legend_fontsize': self.spin_legend_fs.value(),
+            'legend_labelspacing': self.spin_legend_spacing.value(),
+            'legend_2col': self.chk_legend_2col.isChecked(),
             'legend_peak_order': self.chk_legend_peak_order.isChecked(),
             'pl_baseline_correct': self.chk_pl_baseline.isChecked(),
             'xrd_d_spacing': self.chk_d.isChecked(),
@@ -1932,6 +1940,7 @@ class ControlPanel(QScrollArea):
         if 'legend_bg_alpha'        in p: _set(self.spin_legend_alpha, p['legend_bg_alpha'])
         if 'legend_edge_width'      in p: _set(self.spin_legend_edge_w, p['legend_edge_width'])
         if 'legend_fontsize'        in p: _set(self.spin_legend_fs, p['legend_fontsize'])
+        if 'legend_labelspacing'    in p: _set(self.spin_legend_spacing, p['legend_labelspacing'])
         if 'pa_width'               in p: _set(self.spin_pa_w, p['pa_width'])
         if 'pa_height'              in p: _set(self.spin_pa_h, p['pa_height'])
         if 'pa_left'                in p: _set(self.spin_pa_left, p['pa_left'])
@@ -1954,6 +1963,7 @@ class ControlPanel(QScrollArea):
             (self.chk_legend_transp_bg,    'legend_transparent_bg'),
             (self.chk_legend_transp_edge,  'legend_transparent_edge'),
             (self.chk_legend_peak_order,   'legend_peak_order'),
+            (self.chk_legend_2col,         'legend_2col'),
             (self.chk_manual_box,          'manual_layout'),
             (self.chk_snap,                'snap_enabled'),
             (self.chk_pl_baseline,         'pl_baseline_correct'),
@@ -2602,8 +2612,11 @@ def _add_legend(ax, handles: list, labels: list, s: dict):
     if not s['show_legend'] or not handles:
         return
     fs = s.get('legend_fontsize', max(6, s['fontsize'] - 1))
+    _ls = s.get('legend_labelspacing', 0.25)
+    labelspacing = _ls * (10.0 / max(fs, 6.0))  # normalise to 10pt so gap stays constant as font scales
+    ncols = 2 if s.get('legend_2col', False) else 1
     leg = ax.legend(handles, labels, loc=s['legend_loc'],
-                    fontsize=fs, fancybox=False, labelspacing=0.25)
+                    fontsize=fs, fancybox=False, labelspacing=labelspacing, ncols=ncols)
     frame = leg.get_frame()
     # Background — transparent by default.
     if s.get('legend_transparent_bg', True):

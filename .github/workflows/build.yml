@@ -7,7 +7,7 @@ on:
 
 jobs:
 
-  # ── macOS build ─────────────────────────────────────────────────────────────
+  # ── macOS 12-15 build ───────────────────────────────────────────────────────
   build-macos:
     runs-on: macos-15
     steps:
@@ -33,6 +33,33 @@ jobs:
         with:
           name: SPECTRAplot-mac
           path: dist/SPECTRAplot-mac.zip
+          retention-days: 30
+
+  # ── macOS 26 (Tahoe) build ───────────────────────────────────────────────────
+  # Built natively on macOS 26 so Qt frameworks are PAC-compatible
+  build-macos-26:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install pyinstaller numpy matplotlib PyQt6
+
+      - name: Build
+        run: pyinstaller SPECTRAplot.spec
+
+      - name: Zip app
+        run: cd dist && zip -r SPECTRAplot-mac-26.zip SPECTRAplot.app
+
+      - name: Upload mac-26 build
+        uses: actions/upload-artifact@v4
+        with:
+          name: SPECTRAplot-mac-26
+          path: dist/SPECTRAplot-mac-26.zip
           retention-days: 30
 
   # ── Windows build ────────────────────────────────────────────────────────────
