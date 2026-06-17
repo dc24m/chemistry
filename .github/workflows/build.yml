@@ -18,7 +18,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install dependencies
-        run: pip install pyinstaller numpy matplotlib PyQt6
+        run: pip install pyinstaller numpy matplotlib PyQt6 pillow
 
       - name: Build
         run: pyinstaller SPECTRAplot.spec
@@ -47,7 +47,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install dependencies
-        run: pip install pyinstaller numpy matplotlib PyQt6
+        run: pip install pyinstaller numpy matplotlib PyQt6 pillow
 
       - name: Build
         run: pyinstaller SPECTRAplot.spec

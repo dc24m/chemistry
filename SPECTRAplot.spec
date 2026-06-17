@@ -32,7 +32,7 @@ a = Analysis(
         # never used
         'tkinter', '_tkinter',
         'IPython', 'jupyter', 'notebook',
-        'scipy', 'pandas', 'PIL', 'pillow',
+        'scipy', 'pandas',
         # test/dev modules
         'matplotlib.tests', 'matplotlib.testing',
         'numpy.testing', 'numpy.tests', 'numpy.f2py',
