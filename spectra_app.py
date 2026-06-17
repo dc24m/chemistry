@@ -547,7 +547,7 @@ class TopHeader(QWidget):
         self._title_lbl.setObjectName('appTitle')
         self._title_lbl.setTextFormat(Qt.TextFormat.RichText)
         self._set_title_colors('#171717', '#5F5F5F')
-        subtitle = QLabel('by arnold wijoyo')
+        subtitle = QLabel('by Arnold Wijoyo')
         subtitle.setObjectName('brandSub')
 
         bcol.addStretch()
@@ -3065,7 +3065,7 @@ def do_plot(fig: Figure, s: dict) -> str:
 # ── Main window ───────────────────────────────────────────────────────────────
 
 def create_loading_screen() -> QSplashScreen:
-    pixmap = QPixmap(s(760), s(620))
+    pixmap = QPixmap(s(760), s(740))
     pixmap.fill(QColor('#FFFFFF'))
 
     splash = QSplashScreen(pixmap)
@@ -3093,9 +3093,18 @@ def create_loading_screen() -> QSplashScreen:
         img_lbl.setPixmap(pix)
         layout.addWidget(img_lbl)
 
-    title = QLabel('SPECTRAplot')
+    # SPECTRA (extrabold) + plot (light), big, in Montserrat
+    ff = spectra_theme.UI_FONT_FAMILY
+    title = QLabel()
     title.setObjectName('loadingTitle')
+    title.setTextFormat(Qt.TextFormat.RichText)
     title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    title.setText(
+        f'<span style="font-family:{ff};font-size:{s(56)}px;font-weight:800;'
+        f'color:#171717;">SPECTRA</span>'
+        f'<span style="font-family:{ff};font-size:{s(56)}px;font-weight:300;'
+        f'color:#5F5F5F;">plot</span>'
+    )
 
     subtitle = QLabel('PL  ·  ABSORBANCE  ·  XRD  ·  IV')
     subtitle.setObjectName('loadingSubtitle')
@@ -3110,6 +3119,15 @@ def create_loading_screen() -> QSplashScreen:
     progress.setRange(0, 0)
     progress.setTextVisible(False)
 
+    byline = QLabel()
+    byline.setObjectName('loadingBy')
+    byline.setTextFormat(Qt.TextFormat.RichText)
+    byline.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    byline.setText(
+        f'<span style="font-family:{ff};font-size:{s(14)}px;font-weight:500;'
+        f'color:#8A8A8A;">by Arnold Wijoyo</span>'
+    )
+
     layout.addStretch(1)
     layout.addWidget(title)
     layout.addWidget(subtitle)
@@ -3117,6 +3135,7 @@ def create_loading_screen() -> QSplashScreen:
     layout.addWidget(progress)
     layout.addWidget(status)
     layout.addStretch(1)
+    layout.addWidget(byline)
 
     return splash
 
@@ -3552,13 +3571,18 @@ class MainWindow(QMainWindow):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def _load_bundled_fonts():
-    """Load Montserrat (and any other bundled fonts) from assets/ if present."""
-    for fname in ('Montserrat-ExtraBold.ttf', 'Montserrat-Light.ttf',
-                  'Montserrat-Bold.ttf', 'Montserrat-Regular.ttf'):
-        path = resource_path('assets', fname)
-        if os.path.isfile(path):
-            QFontDatabase.addApplicationFont(path)
+def _load_bundled_fonts() -> str:
+    """Load the bundled Montserrat variable font and return its family name, or
+    '' if unavailable. The file is renamed to the unique family 'Montserrat App'
+    so Qt always uses our copy instead of (or colliding with) a system install.
+    The single variable file supplies every weight (Light 300 … ExtraBold 800)."""
+    path = resource_path('assets', 'Montserrat-App.ttf')
+    if os.path.isfile(path):
+        fid = QFontDatabase.addApplicationFont(path)
+        fams = QFontDatabase.applicationFontFamilies(fid)
+        if fams:
+            return fams[0]
+    return ''
 
 
 def _load_ui_font() -> str:
@@ -3584,12 +3608,13 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     init_ui_scale(app)
-    _load_bundled_fonts()
+    mont_font = _load_bundled_fonts()
     ui_font = _load_ui_font()
-    if ui_font:
-        set_ui_font(ui_font)
+    chosen_font = mont_font or ui_font   # Montserrat is the primary UI font
+    if chosen_font:
+        set_ui_font(chosen_font)
     app.setStyleSheet(build_style(MODES[0]['accent'], False, spectra_theme.UI_SCALE))
-    app.setFont(QFont(ui_font or 'Segoe UI', s(9)))
+    app.setFont(QFont(chosen_font or 'Segoe UI', s(9)))
     splash = create_loading_screen()
     splash.show()
     app.processEvents()

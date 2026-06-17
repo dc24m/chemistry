@@ -7,6 +7,7 @@ datas = [
     ('qt.conf', '.'),          # tells Qt where Data/Plugins live so it skips CFBundleCopyBundleURL (macOS 26 PAC crash fix)
     ('assets/logo.png', 'assets'),
     ('assets/loading.png', 'assets'),
+    ('assets/Montserrat-App.ttf', 'assets'),   # Montserrat (renamed family, all weights via variable axis)
     *([('GoogleSans-VariableFont_GRAD,opsz,wght.ttf', '.')] if os.path.isfile('GoogleSans-VariableFont_GRAD,opsz,wght.ttf') else []),
     *([('GoogleSans-Italic-VariableFont_GRAD,opsz,wght.ttf', '.')] if os.path.isfile('GoogleSans-Italic-VariableFont_GRAD,opsz,wght.ttf') else []),
     *collect_data_files('matplotlib'),   # mpl-data: fonts, matplotlibrc, etc.
