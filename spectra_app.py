@@ -3093,11 +3093,19 @@ class PlotCanvas(QWidget):
         return self.fig
 
     def save(self, path: str, fmt: str, dpi: int, width_in: float, height_in: float):
-        orig = self.fig.get_size_inches()
-        self.fig.set_size_inches(width_in, height_in)
-        self.fig.savefig(path, format=fmt, dpi=dpi,
-                         bbox_inches='tight', facecolor='white')
-        self.fig.set_size_inches(*orig)
+        orig_dpi = self.fig.get_dpi()
+        orig_size = self.fig.get_size_inches()
+        try:
+            # Set export DPI first so set_size_inches uses consistent units,
+            # preventing the Retina display-DPI (200) from halving the reported
+            # figure size and clipping multi-panel exports.
+            self.fig.set_dpi(dpi)
+            self.fig.set_size_inches(width_in, height_in)
+            self.fig.savefig(path, format=fmt, dpi=dpi,
+                             bbox_inches='tight', facecolor='white')
+        finally:
+            self.fig.set_dpi(orig_dpi)
+            self.fig.set_size_inches(*orig_size)
 
 
 # ── Plotting helpers ──────────────────────────────────────────────────────────
