@@ -8,7 +8,15 @@ import sys
 import os
 import re
 import json
+import time
+import uuid
 from dataclasses import dataclass
+
+
+def resource_path(*parts) -> str:
+    """Return absolute path to a bundled resource (works frozen via PyInstaller or from source)."""
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
 
 try:
     import numpy as np
@@ -19,6 +27,7 @@ try:
     from matplotlib.figure import Figure
     from matplotlib.colors import to_rgb, to_hex
     from matplotlib.ticker import ScalarFormatter, FuncFormatter
+    from matplotlib.patches import Rectangle
 
     from PyQt6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -28,10 +37,10 @@ try:
         QAbstractItemView, QTabWidget,
         QSizePolicy, QDialog, QDialogButtonBox, QFormLayout,
         QButtonGroup, QSplashScreen, QProgressBar,
-        QToolButton, QFrame, QSlider,
+        QToolButton, QFrame, QSlider, QToolBar,
         QDockWidget, QPlainTextEdit, QStackedWidget,
     )
-    from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
+    from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer, QEvent
     from PyQt6.QtGui import (QFont, QColor, QCursor, QPixmap, QFontDatabase,
                               QUndoStack, QUndoCommand, QKeySequence,
                               QAction, QActionGroup)
@@ -44,8 +53,10 @@ except ModuleNotFoundError as exc:
         "  python -m pip install -r requirements_spectra.txt"
     ) from exc
 
+import spectra_theme
 from spectra_theme import (
-    MODES, MODE_BY_KEY, darken, add_shadow, build_style,
+    MODES, MODE_BY_KEY, darken, add_shadow, build_style, s, init_ui_scale,
+    set_ui_font,
 )
 
 matplotlib.rcParams.update({
@@ -57,6 +68,7 @@ matplotlib.rcParams.update({
     'figure.facecolor': 'white',
     'axes.facecolor': 'white',
     'savefig.facecolor': 'white',
+    'mathtext.fontset': 'dejavusans',
 })
 
 
@@ -107,6 +119,7 @@ def clean_label(filename: str) -> str:
 def make_trace(path: str) -> dict:
     """Build a per-trace customization record from a file path."""
     return {
+        'uid': uuid.uuid4().hex,   # stable id so canvas edits map back to this record
         'path': path,
         'display_name': clean_label(os.path.basename(path)),
         'color': '#000000',       # MATLAB-black default
@@ -302,6 +315,12 @@ class NoScrollComboBox(QComboBox):
         event.ignore()
 
 
+class NoScrollSlider(QSlider):
+    """Slider that ignores wheel events — must be clicked/dragged to change."""
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 # ── Color picker button ───────────────────────────────────────────────────────
 
 class ColorButton(QPushButton):
@@ -324,8 +343,8 @@ class ColorButton(QPushButton):
         self.setStyleSheet(
             f'QPushButton#colorpick {{ background:{self._hex}; color:{txt}; '
             f'border:1px solid rgba(0,0,0,0.18); border-radius:6px; '
-            f'min-height:26px; max-height:26px; padding:3px 8px; '
-            f'font-size:12px; font-weight:700; }}'
+            f'min-height:{s(26)}px; max-height:{s(26)}px; padding:{s(3)}px {s(8)}px; '
+            f'font-size:{s(12)}px; font-weight:700; }}'
         )
         self.setText(self._hex.upper())
 
@@ -352,6 +371,9 @@ class FigureState:
     editor: object
     mode:   str
     label:  str
+    # Snapshot of the control panel's data inputs (traces, IV sweeps, XRD refs)
+    # for this figure, so switching tabs restores what was loaded. None = empty.
+    data:   dict = None
 
 
 class FigureTabBar(QWidget):
@@ -362,18 +384,18 @@ class FigureTabBar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('figureTabBar')
-        self.setFixedHeight(36)
+        self.setFixedHeight(s(36))
         self._layout = QHBoxLayout(self)
-        self._layout.setContentsMargins(8, 4, 8, 4)
-        self._layout.setSpacing(4)
+        self._layout.setContentsMargins(s(8), s(4), s(8), s(4))
+        self._layout.setSpacing(s(4))
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._slots: list[tuple[QPushButton, QPushButton]] = []  # (tab_btn, close_btn)
 
         self._add_btn = QPushButton('+')
         self._add_btn.setObjectName('figureAddBtn')
-        self._add_btn.setFixedHeight(26)
-        self._add_btn.setFixedWidth(32)
+        self._add_btn.setFixedHeight(s(26))
+        self._add_btn.setFixedWidth(s(32))
         self._add_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._add_btn.clicked.connect(self.figure_add_requested)
         self._layout.addWidget(self._add_btn)
@@ -384,20 +406,20 @@ class FigureTabBar(QWidget):
         slot = QWidget()
         slot_lay = QHBoxLayout(slot)
         slot_lay.setContentsMargins(0, 0, 0, 0)
-        slot_lay.setSpacing(2)
+        slot_lay.setSpacing(s(2))
 
         tab_btn = QPushButton(label)
         tab_btn.setObjectName('figureTab')
         tab_btn.setCheckable(True)
-        tab_btn.setFixedHeight(26)
+        tab_btn.setFixedHeight(s(26))
         tab_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         tab_btn.clicked.connect(lambda _, i=idx: self.figure_selected.emit(i))
         self._group.addButton(tab_btn)
 
         close_btn = QPushButton('×')
         close_btn.setObjectName('figureTabClose')
-        close_btn.setFixedHeight(20)
-        close_btn.setFixedWidth(18)
+        close_btn.setFixedHeight(s(20))
+        close_btn.setFixedWidth(s(18))
         close_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         close_btn.clicked.connect(lambda _, i=idx: self.figure_close_requested.emit(i))
         close_btn.setVisible(False)  # hidden until >1 tab
@@ -453,7 +475,7 @@ class ModeTabBar(QWidget):
         super().__init__(parent)
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
+        row.setSpacing(s(6))
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self.buttons = {}
@@ -465,10 +487,10 @@ class ModeTabBar(QWidget):
             b.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
             # Use the larger of the spec floor and the measured text width so the
             # label is guaranteed room with padding to spare.
-            floor = self._MIN_W.get(m['key'], 130)
-            measured = b.fontMetrics().horizontalAdvance(m['label']) + 34
+            floor = s(self._MIN_W.get(m['key'], 130))
+            measured = b.fontMetrics().horizontalAdvance(m['label']) + s(34)
             b.setMinimumWidth(max(floor, measured))
-            b.setMinimumHeight(34)
+            b.setMinimumHeight(s(34))
             b.clicked.connect(lambda _, k=m['key']: self._select(k))
             self._group.addButton(b)
             self.buttons[m['key']] = b
@@ -505,25 +527,29 @@ class TopHeader(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('topHeader')
-        self.setFixedHeight(80)
+        self.setFixedHeight(s(80))
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(14, 0, 14, 0)
+        lay.setContentsMargins(s(14), 0, s(14), 0)
         lay.setSpacing(0)
 
         # ── Logo image (assets/logo.png, optional)
-        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 'assets', 'logo.png')
+        logo_path = resource_path('assets', 'logo.png')
         if os.path.isfile(logo_path):
             logo_lbl = QLabel()
             logo_lbl.setObjectName('logoImg')
-            pix = QPixmap(logo_path)
-            logo_lbl.setPixmap(pix.scaled(48, 48,
+            # Render at the screen's native pixel density so it stays crisp on Retina.
+            scr = QApplication.primaryScreen()
+            dpr = scr.devicePixelRatio() if scr else 1.0
+            pix = QPixmap(logo_path).scaled(
+                int(s(48) * dpr), int(s(48) * dpr),
                 Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation))
-            logo_lbl.setFixedSize(48, 48)
+                Qt.TransformationMode.SmoothTransformation)
+            pix.setDevicePixelRatio(dpr)
+            logo_lbl.setPixmap(pix)
+            logo_lbl.setFixedSize(s(48), s(48))
             lay.addWidget(logo_lbl)
-            lay.addSpacing(11)
+            lay.addSpacing(s(11))
 
         # ── Brand block: SPECTRA + plot title over subtitle
         brand = QWidget()
@@ -535,16 +561,19 @@ class TopHeader(QWidget):
         self._title_lbl = QLabel()
         self._title_lbl.setObjectName('appTitle')
         self._title_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._title_lbl.setContentsMargins(0, 0, 0, 0)
         self._set_title_colors('#171717', '#5F5F5F')
-        subtitle = QLabel('by arnold wijoyo')
+        subtitle = QLabel('by Arnold Wijoyo')
         subtitle.setObjectName('brandSub')
+        # Pull the byline up tight under the title.
+        subtitle.setContentsMargins(0, s(-4), 0, 0)
 
         bcol.addStretch()
         bcol.addWidget(self._title_lbl)
         bcol.addWidget(subtitle)
         bcol.addStretch()
         lay.addWidget(brand)
-        lay.addSpacing(22)
+        lay.addSpacing(s(22))
 
         self.mode_tabs = ModeTabBar()
         self.mode_tabs.mode_changed.connect(self.mode_changed)
@@ -554,26 +583,26 @@ class TopHeader(QWidget):
 
         self.btn_plot = QPushButton('PLOT')
         self.btn_plot.setObjectName('headerPlotBtn')
-        self.btn_plot.setFixedHeight(42)
-        self.btn_plot.setMinimumWidth(96)
+        self.btn_plot.setFixedHeight(s(42))
+        self.btn_plot.setMinimumWidth(s(96))
         self.btn_plot.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_plot.clicked.connect(self.plot_requested)
         lay.addWidget(self.btn_plot)
-        lay.addSpacing(8)
+        lay.addSpacing(s(8))
 
         self.btn_theme = QPushButton('Dark')
         self.btn_theme.setObjectName('themeToggle')
         self.btn_theme.setCheckable(True)
-        self.btn_theme.setFixedSize(62, 36)
+        self.btn_theme.setFixedSize(s(62), s(36))
         self.btn_theme.toggled.connect(self.theme_toggled)
         lay.addWidget(self.btn_theme)
 
     def _set_title_colors(self, ink: str, muted: str):
-        ff = self._TITLE_FF
+        ff = spectra_theme.UI_FONT_FAMILY
         self._title_lbl.setText(
-            f'<span style="font-family:{ff};font-size:30px;font-weight:800;'
+            f'<span style="font-family:{ff};font-size:{s(30)}px;font-weight:800;'
             f'letter-spacing:0;color:{ink};">SPECTRA</span>'
-            f'<span style="font-family:{ff};font-size:30px;font-weight:300;'
+            f'<span style="font-family:{ff};font-size:{s(30)}px;font-weight:300;'
             f'color:{muted};">plot</span>'
         )
 
@@ -593,10 +622,10 @@ class TraceEditDialog(QDialog):
         super().__init__(parent)
         self.trace = trace
         self.setWindowTitle('Edit Trace')
-        self.setMinimumWidth(340)
+        self.setMinimumWidth(s(340))
 
         form = QFormLayout(self)
-        form.setSpacing(10)
+        form.setSpacing(s(10))
 
         self.edit_name = QLineEdit(trace.get('display_name', ''))
         form.addRow('Trace name', self.edit_name)
@@ -664,6 +693,76 @@ class TraceEditDialog(QDialog):
         self.trace['linestyle'] = self.combo_ls.currentText()
 
 
+class ReferenceEditDialog(QDialog):
+    """Edit one XRD reference: label, color, line-width override, line style.
+    Reads/writes the ControlPanel parallel lists at index `idx`, so the list box
+    and the figure-pane double-click share exactly the same editor."""
+
+    def __init__(self, idx: int, parent=None, controls=None):
+        super().__init__(parent)
+        self.idx = idx
+        self.controls = controls
+        self.setWindowTitle('Edit Reference')
+        self.setMinimumWidth(s(340))
+
+        form = QFormLayout(self)
+        form.setSpacing(s(10))
+
+        cur_label = controls.xrd_ref_labels[idx] if idx < len(controls.xrd_ref_labels) else ''
+        cur_color = controls.xrd_ref_colors[idx] if idx < len(controls.xrd_ref_colors) else '#000000'
+        cur_w = controls.xrd_ref_widths[idx] if idx < len(controls.xrd_ref_widths) else None
+        cur_ls = controls.xrd_ref_styles[idx] if idx < len(controls.xrd_ref_styles) else 'solid'
+
+        self.edit_name = QLineEdit(cur_label)
+        form.addRow('Label', self.edit_name)
+
+        path = controls.xrd_ref_paths[idx] if idx < len(controls.xrd_ref_paths) else ''
+        lbl_file = QLabel(os.path.basename(path) or '—')
+        lbl_file.setObjectName('hint')
+        lbl_file.setWordWrap(True)
+        lbl_file.setToolTip(path)
+        form.addRow('File', lbl_file)
+
+        self.color = ColorButton(cur_color)
+        form.addRow('Color', self.color)
+
+        self.chk_lw = QCheckBox('Override line width')
+        self.spin_lw = FlatDoubleSpinBox()
+        self.spin_lw.setRange(0.2, 10.0); self.spin_lw.setSingleStep(0.5); self.spin_lw.setDecimals(1)
+        self.chk_lw.setChecked(cur_w is not None)
+        self.spin_lw.setValue(float(cur_w) if cur_w is not None else 2.0)
+        self.spin_lw.setEnabled(cur_w is not None)
+        self.chk_lw.toggled.connect(self.spin_lw.setEnabled)
+        lw_row = QHBoxLayout(); lw_row.addWidget(self.chk_lw); lw_row.addWidget(self.spin_lw)
+        lw_w = QWidget(); lw_w.setLayout(lw_row)
+        form.addRow('Line width', lw_w)
+
+        self.combo_ls = QComboBox()
+        self.combo_ls.addItems(LINESTYLE_LABELS)
+        if cur_ls in LINESTYLE_LABELS:
+            self.combo_ls.setCurrentText(cur_ls)
+        form.addRow('Line style', self.combo_ls)
+
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+
+    def apply(self):
+        c = self.controls
+        i = self.idx
+        name = self.edit_name.text().strip()
+        if i < len(c.xrd_ref_labels) and name:
+            c.xrd_ref_labels[i] = name
+        if i < len(c.xrd_ref_colors):
+            c.xrd_ref_colors[i] = self.color.hex()
+        if i < len(c.xrd_ref_widths):
+            c.xrd_ref_widths[i] = self.spin_lw.value() if self.chk_lw.isChecked() else None
+        if i < len(c.xrd_ref_styles):
+            c.xrd_ref_styles[i] = self.combo_ls.currentText()
+
+
 # ── Per-row trace widget (name label + eye toggle) ───────────────────────────
 
 class _TraceRow(QWidget):
@@ -675,14 +774,14 @@ class _TraceRow(QWidget):
         self._on_change = on_change
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(6, 0, 2, 0)
-        lay.setSpacing(4)
+        lay.setContentsMargins(s(6), 0, s(2), 0)
+        lay.setSpacing(s(4))
 
         self.lbl = QLabel()
         self.lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         self.btn = QToolButton()
-        self.btn.setFixedSize(26, 22)
+        self.btn.setFixedSize(s(26), s(22))
         self.btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn.clicked.connect(self._toggle)
 
@@ -702,7 +801,7 @@ class _TraceRow(QWidget):
         self.lbl.setStyleSheet('' if visible else 'color: #A8A8A8;')
         ink = '#444444' if visible else '#C0C0C0'
         self.btn.setStyleSheet(
-            f'QToolButton {{ border: none; background: transparent; font-size: 14px; '
+            f'QToolButton {{ border: none; background: transparent; font-size: {s(14)}px; '
             f'color: {ink}; padding: 0px; }}'
             f'QToolButton:hover {{ background: rgba(0,0,0,0.08); border-radius: 3px; }}'
         )
@@ -722,18 +821,18 @@ class PanelFileWidget(QWidget):
         self.traces: list[dict] = []
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 10, 10, 10)
-        lay.setSpacing(8)
+        lay.setContentsMargins(s(10), s(10), s(10), s(10))
+        lay.setSpacing(s(8))
 
         self.lst = QListWidget()
         self.lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.lst.setMinimumHeight(75)
-        self.lst.setMaximumHeight(220)
+        self.lst.setMinimumHeight(s(75))
+        self.lst.setMaximumHeight(s(220))
         self.lst.itemDoubleClicked.connect(self._edit_double)
         lay.addWidget(self.lst)
 
         br = QHBoxLayout()
-        br.setSpacing(6)
+        br.setSpacing(s(6))
         self.btn_add = QPushButton('+ Add Files')
         self.btn_add.setObjectName('secondary')
         self.btn_rem = QPushButton('Remove')
@@ -762,9 +861,9 @@ class PanelFileWidget(QWidget):
             ('c_bot', 'Bottom color', '#000000'),
         ):
             row = QHBoxLayout()
-            row.setSpacing(8)
+            row.setSpacing(s(8))
             lbl = QLabel(label_text)
-            lbl.setFixedWidth(78)
+            lbl.setFixedWidth(s(96))
             lbl.setObjectName('fieldlbl')
             btn = ColorButton(default)
             btn.color_changed.connect(lambda _: self.changed.emit())
@@ -816,6 +915,12 @@ class PanelFileWidget(QWidget):
         if rows:
             self.changed.emit()
 
+    def clear(self):
+        """Drop every trace from this panel. Used to give a freshly added
+        figure an empty data box (does not emit `changed`)."""
+        self.lst.clear()
+        self.traces.clear()
+
     def _edit_double(self, item):
         self._edit_trace(self.lst.row(item))
 
@@ -846,6 +951,33 @@ class PanelFileWidget(QWidget):
     def use_gradient(self) -> bool:
         return self.chk_gradient.isChecked()
 
+    def get_state(self) -> dict:
+        """Snapshot this panel for per-figure persistence. Trace dicts are kept
+        by reference (each belongs to one figure) so in-place edits survive."""
+        return {
+            'traces': list(self.traces),
+            'gradient': (self.c_top.hex(), self.c_bot.hex()),
+            'use_gradient': self.chk_gradient.isChecked(),
+        }
+
+    def set_state(self, st: dict):
+        """Repopulate this panel from a get_state() snapshot, without emitting
+        `changed` (the caller triggers a single refresh)."""
+        self.clear()
+        g = st.get('gradient', ('#000000', '#000000'))
+        self.c_top.set_hex(g[0])
+        self.c_bot.set_hex(g[1])
+        self.chk_gradient.blockSignals(True)
+        self.chk_gradient.setChecked(st.get('use_gradient', True))
+        self.chk_gradient.blockSignals(False)
+        self._toggle_gradient(self.chk_gradient.isChecked())
+        for tr in st.get('traces', []):
+            self.traces.append(tr)
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, 30))
+            self.lst.addItem(item)
+            self.lst.setItemWidget(item, _TraceRow(tr, self.changed.emit))
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -857,13 +989,13 @@ class IVDataSetWidget(QWidget):
         self.pos_path = ''
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 8, 4, 8)
-        lay.setSpacing(10)
+        lay.setContentsMargins(s(4), s(8), s(4), s(8))
+        lay.setSpacing(s(10))
 
         meta = QGroupBox('Set identity')
         meta_lay = QFormLayout(meta)
-        meta_lay.setContentsMargins(8, 14, 8, 8)
-        meta_lay.setVerticalSpacing(8)
+        meta_lay.setContentsMargins(s(8), s(14), s(8), s(8))
+        meta_lay.setVerticalSpacing(s(8))
         self.edit_name = QLineEdit(f'Set {index + 1}')
         self.edit_name.setPlaceholderText(f'Set {index + 1}')
         self.color = ColorButton(IV_SET_COLORS[index % len(IV_SET_COLORS)])
@@ -893,28 +1025,28 @@ class IVDataSetWidget(QWidget):
 
     def _sweep_row(self, title: str, browse_handler, clear_handler):
         row = QVBoxLayout()
-        row.setSpacing(6)
+        row.setSpacing(s(6))
         title_label = QLabel(title)
         title_label.setObjectName('fieldlbl')
         path_label = QLabel('No CSV selected')
         path_label.setObjectName('hint')
-        path_label.setMinimumWidth(120)
+        path_label.setMinimumWidth(s(120))
         path_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         btn_browse = QPushButton('Browse')
         btn_browse.setObjectName('secondary')
         btn_clear = QPushButton('X')
         btn_clear.setObjectName('danger')
-        btn_clear.setFixedWidth(34)
+        btn_clear.setFixedWidth(s(34))
         btn_browse.clicked.connect(browse_handler)
         btn_clear.clicked.connect(clear_handler)
 
         file_row = QHBoxLayout()
-        file_row.setSpacing(6)
+        file_row.setSpacing(s(6))
         file_row.addWidget(title_label)
         file_row.addWidget(path_label, 1)
 
         action_row = QHBoxLayout()
-        action_row.setSpacing(6)
+        action_row.setSpacing(s(6))
         action_row.addStretch(1)
         action_row.addWidget(btn_browse)
         action_row.addWidget(btn_clear)
@@ -950,6 +1082,25 @@ class IVDataSetWidget(QWidget):
             self.pos_path = ''
         self._refresh_sweep_labels()
 
+    def clear(self):
+        """Forget both sweep CSVs so a freshly added figure starts empty."""
+        self.neg_path = ''
+        self.pos_path = ''
+        self._refresh_sweep_labels()
+
+    def get_state(self) -> dict:
+        return {'name': self.edit_name.text(), 'color': self.color.hex(),
+                'neg_path': self.neg_path, 'pos_path': self.pos_path}
+
+    def set_state(self, st: dict):
+        self.edit_name.blockSignals(True)
+        self.edit_name.setText(st.get('name', ''))
+        self.edit_name.blockSignals(False)
+        self.color.set_hex(st.get('color', self.color.hex()))
+        self.neg_path = st.get('neg_path', '')
+        self.pos_path = st.get('pos_path', '')
+        self._refresh_sweep_labels()
+
     def display_name(self) -> str:
         return self.edit_name.text().strip() or f'Set {self.index + 1}'
 
@@ -962,11 +1113,11 @@ class IVDataSetWidget(QWidget):
         }
 
 
-def _labeled(label_text: str, widget: QWidget, lw: int = 74) -> QHBoxLayout:
+def _labeled(label_text: str, widget: QWidget, lw: int = 90) -> QHBoxLayout:
     r = QHBoxLayout()
-    r.setSpacing(8)
+    r.setSpacing(s(8))
     lbl = QLabel(label_text)
-    lbl.setFixedWidth(lw)
+    lbl.setFixedWidth(s(lw))
     lbl.setObjectName('fieldlbl')
     r.addWidget(lbl)
     r.addWidget(widget)
@@ -975,8 +1126,8 @@ def _labeled(label_text: str, widget: QWidget, lw: int = 74) -> QHBoxLayout:
 
 def _sep() -> QLabel:
     sep = QLabel()
-    sep.setFixedHeight(1)
-    sep.setStyleSheet('background: #E2E8F0; margin: 4px 0;')
+    sep.setFixedHeight(s(1))
+    sep.setStyleSheet(f'background: #E2E8F0; margin: {s(4)}px 0;')
     return sep
 
 
@@ -991,7 +1142,7 @@ class ControlPanel(QScrollArea):
         self.setObjectName('sidebar')
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setFixedWidth(368)
+        self.setFixedWidth(s(368))
 
         root = QWidget()
         root.setObjectName('sidebar')
@@ -1000,15 +1151,15 @@ class ControlPanel(QScrollArea):
         self.setWidget(root)
 
         lay = QVBoxLayout(root)
-        lay.setContentsMargins(8, 8, 8, 12)
-        lay.setSpacing(6)
+        lay.setContentsMargins(s(8), s(8), s(8), s(12))
+        lay.setSpacing(s(6))
 
         self._current_mode = MODES[0]['key']
 
         # ── Plot panels
         self.g_plot = QGroupBox('Plot')
         gl = QVBoxLayout(self.g_plot)
-        gl.setSpacing(9)
+        gl.setSpacing(s(9))
         self.spin_panels = FlatSpinBox()
         self.spin_panels.setRange(1, 5)
         self.spin_panels.setValue(1)
@@ -1026,8 +1177,8 @@ class ControlPanel(QScrollArea):
         # ── Data tabs
         self.g_data = QGroupBox('Data')
         dgl = QVBoxLayout(self.g_data)
-        dgl.setContentsMargins(8, 16, 8, 8)
-        dgl.setSpacing(6)
+        dgl.setContentsMargins(s(8), s(16), s(8), s(8))
+        dgl.setSpacing(s(6))
         hint = QLabel('Add .csv / .tsv / .xy files per panel.')
         hint.setObjectName('hint')
         hint.setWordWrap(True)
@@ -1046,8 +1197,8 @@ class ControlPanel(QScrollArea):
 
         self.g_iv = QGroupBox('IV Curve Data')
         iv_lay = QVBoxLayout(self.g_iv)
-        iv_lay.setContentsMargins(4, 14, 4, 8)
-        iv_lay.setSpacing(8)
+        iv_lay.setContentsMargins(s(4), s(14), s(4), s(8))
+        iv_lay.setSpacing(s(8))
         self.spin_iv_sets = FlatSpinBox()
         self.spin_iv_sets.setRange(1, 10)
         self.spin_iv_sets.setValue(3)
@@ -1072,19 +1223,19 @@ class ControlPanel(QScrollArea):
         # ── Axes
         self.g_axes = QGroupBox('Axes')
         agl = QVBoxLayout(self.g_axes)
-        agl.setSpacing(9)
+        agl.setSpacing(s(9))
 
-        xrow = QHBoxLayout(); xrow.setSpacing(5)
-        xl = QLabel('X range'); xl.setFixedWidth(52); xl.setObjectName('fieldlbl')
+        xrow = QHBoxLayout(); xrow.setSpacing(s(5))
+        xl = QLabel('X range'); xl.setFixedWidth(s(66)); xl.setObjectName('fieldlbl')
         self.spin_xmin = FlatDoubleSpinBox()
         self.spin_xmax = FlatDoubleSpinBox()
-        for s in (self.spin_xmin, self.spin_xmax):
-            s.setRange(-9999, 99999); s.setDecimals(1)
-            s.setMinimumWidth(56)
-            s.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for sb in (self.spin_xmin, self.spin_xmax):
+            sb.setRange(-9999, 99999); sb.setDecimals(1)
+            sb.setMinimumWidth(s(56))
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.spin_xmin.setValue(400); self.spin_xmax.setValue(800)
         dash = QLabel('–'); dash.setStyleSheet('color:#8a93a0;')
-        dash.setFixedWidth(12); dash.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dash.setFixedWidth(s(12)); dash.setAlignment(Qt.AlignmentFlag.AlignCenter)
         xrow.addWidget(xl); xrow.addWidget(self.spin_xmin, 1)
         xrow.addWidget(dash); xrow.addWidget(self.spin_xmax, 1)
         agl.addLayout(xrow)
@@ -1108,17 +1259,17 @@ class ControlPanel(QScrollArea):
         self.chk_pauto_x = QCheckBox('Auto X (this panel)')
         self.chk_pauto_x.toggled.connect(self._toggle_panel_xlim)
         agl.addWidget(self.chk_pauto_x)
-        pxrow = QHBoxLayout(); pxrow.setSpacing(5)
-        pxl = QLabel('X range'); pxl.setFixedWidth(52); pxl.setObjectName('fieldlbl')
+        pxrow = QHBoxLayout(); pxrow.setSpacing(s(5))
+        pxl = QLabel('X range'); pxl.setFixedWidth(s(66)); pxl.setObjectName('fieldlbl')
         self.spin_pxmin = FlatDoubleSpinBox()
         self.spin_pxmax = FlatDoubleSpinBox()
-        for s in (self.spin_pxmin, self.spin_pxmax):
-            s.setRange(-9999, 99999); s.setDecimals(1)
-            s.setMinimumWidth(56)
-            s.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for sb in (self.spin_pxmin, self.spin_pxmax):
+            sb.setRange(-9999, 99999); sb.setDecimals(1)
+            sb.setMinimumWidth(s(56))
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.spin_pxmin.setValue(400); self.spin_pxmax.setValue(800)
         pdash = QLabel('–'); pdash.setStyleSheet('color:#8a93a0;')
-        pdash.setFixedWidth(12); pdash.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pdash.setFixedWidth(s(12)); pdash.setAlignment(Qt.AlignmentFlag.AlignCenter)
         pxrow.addWidget(pxl); pxrow.addWidget(self.spin_pxmin, 1)
         pxrow.addWidget(pdash); pxrow.addWidget(self.spin_pxmax, 1)
         agl.addLayout(pxrow)
@@ -1129,17 +1280,17 @@ class ControlPanel(QScrollArea):
 
         agl.addWidget(_sep())
 
-        yrow = QHBoxLayout(); yrow.setSpacing(5)
-        yl = QLabel('Y range'); yl.setFixedWidth(52); yl.setObjectName('fieldlbl')
+        yrow = QHBoxLayout(); yrow.setSpacing(s(5))
+        yl = QLabel('Y range'); yl.setFixedWidth(s(66)); yl.setObjectName('fieldlbl')
         self.spin_ymin = FlatDoubleSpinBox()
         self.spin_ymax = FlatDoubleSpinBox()
-        for s in (self.spin_ymin, self.spin_ymax):
-            s.setRange(-9999999, 9999999); s.setDecimals(2)
-            s.setMinimumWidth(56)
-            s.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for sb in (self.spin_ymin, self.spin_ymax):
+            sb.setRange(-9999999, 9999999); sb.setDecimals(2)
+            sb.setMinimumWidth(s(56))
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.spin_ymin.setValue(0); self.spin_ymax.setValue(1)
         dash2 = QLabel('–'); dash2.setStyleSheet('color:#8a93a0;')
-        dash2.setFixedWidth(12); dash2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dash2.setFixedWidth(s(12)); dash2.setAlignment(Qt.AlignmentFlag.AlignCenter)
         yrow.addWidget(yl); yrow.addWidget(self.spin_ymin, 1)
         yrow.addWidget(dash2); yrow.addWidget(self.spin_ymax, 1)
         agl.addLayout(yrow)
@@ -1160,7 +1311,7 @@ class ControlPanel(QScrollArea):
         # ── Labels
         g4 = QGroupBox('Labels')
         lgl = QVBoxLayout(g4)
-        lgl.setSpacing(7)
+        lgl.setSpacing(s(7))
         self.chk_main_title = QCheckBox('Main title')
         self.edit_main_title = QLineEdit()
         self.edit_main_title.setPlaceholderText('Enter main title…')
@@ -1185,7 +1336,7 @@ class ControlPanel(QScrollArea):
         # ── Style
         g5 = QGroupBox('Style')
         sgl = QVBoxLayout(g5)
-        sgl.setSpacing(9)
+        sgl.setSpacing(s(9))
 
         self.spin_lw = FlatDoubleSpinBox()
         self.spin_lw.setRange(0.5, 6.0); self.spin_lw.setSingleStep(0.5); self.spin_lw.setValue(1.5)
@@ -1197,12 +1348,12 @@ class ControlPanel(QScrollArea):
 
         sgl.addWidget(_sep())
 
-        fw_row = QHBoxLayout(); fw_row.setSpacing(5)
-        fw_lbl = QLabel('Size (px)'); fw_lbl.setFixedWidth(52); fw_lbl.setObjectName('fieldlbl')
+        fw_row = QHBoxLayout(); fw_row.setSpacing(s(5))
+        fw_lbl = QLabel('Size (px)'); fw_lbl.setFixedWidth(s(66)); fw_lbl.setObjectName('fieldlbl')
         self.spin_fw = FlatSpinBox()
         self.spin_fh = FlatSpinBox()
-        for s in (self.spin_fw, self.spin_fh):
-            s.setRange(100, 3000); s.setSingleStep(50); s.setMaximumWidth(78)
+        for sb in (self.spin_fw, self.spin_fh):
+            sb.setRange(100, 3000); sb.setSingleStep(50); sb.setMaximumWidth(s(78))
         self.spin_fw.setValue(800); self.spin_fh.setValue(500)
         fw_x = QLabel('×'); fw_x.setStyleSheet('color:#8a93a0;')
         fw_row.addWidget(fw_lbl)
@@ -1219,7 +1370,7 @@ class ControlPanel(QScrollArea):
         # ── Graph Appearance (figure font family)
         g_app = QGroupBox('Graph Appearance')
         appl = QVBoxLayout(g_app)
-        appl.setSpacing(4)
+        appl.setSpacing(s(4))
         self.combo_font = NoScrollComboBox()
         self.combo_font.addItems([
             'Arial', 'Helvetica', 'Times New Roman',
@@ -1242,8 +1393,8 @@ class ControlPanel(QScrollArea):
         # ── Ticks (MATLAB-style boxed axes by default)
         g_tick = QGroupBox('Ticks')
         tgl = QVBoxLayout(g_tick)
-        tgl.setSpacing(4)
-        tgl.setContentsMargins(8, 6, 8, 6)
+        tgl.setSpacing(s(4))
+        tgl.setContentsMargins(s(8), s(6), s(8), s(6))
         self.combo_tick_dir = QComboBox()
         self.combo_tick_dir.addItems(['in', 'out', 'inout'])
         self.combo_tick_dir.setCurrentText('in')
@@ -1269,8 +1420,8 @@ class ControlPanel(QScrollArea):
         # ── Number format (axis notation)
         g_num = QGroupBox('Axis Numbers')
         ngl = QVBoxLayout(g_num)
-        ngl.setSpacing(4)
-        ngl.setContentsMargins(8, 6, 8, 6)
+        ngl.setSpacing(s(4))
+        ngl.setContentsMargins(s(8), s(6), s(8), s(6))
         self.combo_ynot = QComboBox()
         self.combo_ynot.addItems(['Normal', 'Scientific notation', 'Engineering/K'])
         self.combo_ynot.currentTextChanged.connect(self._toggle_sci)
@@ -1284,20 +1435,20 @@ class ControlPanel(QScrollArea):
         self.spin_sci_exp.setEnabled(False)
         ngl.addLayout(_labeled('Exponent', self.spin_sci_exp, 70))
         # slider + spinbox: distance from axis numbers to box outline
-        self.slider_numpad = QSlider(Qt.Orientation.Horizontal)
+        self.slider_numpad = NoScrollSlider(Qt.Orientation.Horizontal)
         self.slider_numpad.setRange(0, 30)
         self.slider_numpad.setValue(10)
         self.spin_numpad = FlatSpinBox()
         self.spin_numpad.setRange(0, 30)
         self.spin_numpad.setValue(10)
-        self.spin_numpad.setFixedWidth(44)
+        self.spin_numpad.setFixedWidth(s(44))
         self.slider_numpad.valueChanged.connect(self.spin_numpad.setValue)
         self.spin_numpad.valueChanged.connect(self.slider_numpad.setValue)
         self.slider_numpad.valueChanged.connect(lambda _: self.plot_requested.emit())
         _dist_row = QHBoxLayout()
-        _dist_row.setSpacing(6)
+        _dist_row.setSpacing(s(6))
         _lbl_dist = QLabel('Distance')
-        _lbl_dist.setFixedWidth(70)
+        _lbl_dist.setFixedWidth(s(70))
         _lbl_dist.setObjectName('fieldlbl')
         _dist_row.addWidget(_lbl_dist)
         _dist_row.addWidget(self.slider_numpad, 1)
@@ -1308,8 +1459,8 @@ class ControlPanel(QScrollArea):
         # ── Legend (full customization; transparent background by default)
         g_legend = QGroupBox('Legend')
         lgll = QFormLayout(g_legend)
-        lgll.setVerticalSpacing(4)
-        lgll.setContentsMargins(8, 6, 8, 6)
+        lgll.setVerticalSpacing(s(4))
+        lgll.setContentsMargins(s(8), s(6), s(8), s(6))
         lgll.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.chk_legend = QCheckBox('Show legend')
         self.chk_legend.setChecked(True)
@@ -1335,8 +1486,8 @@ class ControlPanel(QScrollArea):
         self.spin_legend_alpha = FlatDoubleSpinBox()
         self.spin_legend_alpha.setRange(0.0, 1.0); self.spin_legend_alpha.setSingleStep(0.05)
         self.spin_legend_alpha.setDecimals(2); self.spin_legend_alpha.setValue(0.0)
-        self.spin_legend_alpha.setFixedWidth(56)
-        _bg_row = QHBoxLayout(); _bg_row.setSpacing(4)
+        self.spin_legend_alpha.setFixedWidth(s(56))
+        _bg_row = QHBoxLayout(); _bg_row.setSpacing(s(4))
         _bg_row.addWidget(self.color_legend_bg); _bg_row.addWidget(self.spin_legend_alpha)
         _bg_w = QWidget(); _bg_w.setLayout(_bg_row)
         lgll.addRow('BG / α', _bg_w)
@@ -1349,8 +1500,8 @@ class ControlPanel(QScrollArea):
         self.spin_legend_edge_w = FlatDoubleSpinBox()
         self.spin_legend_edge_w.setRange(0.0, 6.0); self.spin_legend_edge_w.setSingleStep(0.1)
         self.spin_legend_edge_w.setDecimals(1); self.spin_legend_edge_w.setValue(0.8)
-        self.spin_legend_edge_w.setFixedWidth(56)
-        _edge_row = QHBoxLayout(); _edge_row.setSpacing(4)
+        self.spin_legend_edge_w.setFixedWidth(s(56))
+        _edge_row = QHBoxLayout(); _edge_row.setSpacing(s(4))
         _edge_row.addWidget(self.color_legend_edge); _edge_row.addWidget(self.spin_legend_edge_w)
         _edge_w = QWidget(); _edge_w.setLayout(_edge_row)
         lgll.addRow('Edge / w', _edge_w)
@@ -1358,18 +1509,30 @@ class ControlPanel(QScrollArea):
         self.spin_legend_fs.setRange(4.0, 40.0); self.spin_legend_fs.setSingleStep(1.0)
         self.spin_legend_fs.setDecimals(1); self.spin_legend_fs.setValue(16.0)
         lgll.addRow('Font size', self.spin_legend_fs)
+        self.spin_legend_spacing = FlatDoubleSpinBox()
+        self.spin_legend_spacing.setRange(0.0, 3.0); self.spin_legend_spacing.setSingleStep(0.05)
+        self.spin_legend_spacing.setDecimals(2); self.spin_legend_spacing.setValue(0.25)
+        lgll.addRow('Entry spacing', self.spin_legend_spacing)
+        self.chk_legend_2col = QCheckBox('2 columns')
+        lgll.addRow(self.chk_legend_2col)
+        self.combo_legend_align = NoScrollComboBox()
+        self.combo_legend_align.addItems(['left', 'center', 'right'])
+        lgll.addRow('Label align', self.combo_legend_align)
+        self.chk_legend_markerfirst = QCheckBox('Markers on left')
+        self.chk_legend_markerfirst.setChecked(True)
+        lgll.addRow(self.chk_legend_markerfirst)
 
         # ── Plot Box (axis box, tick-label padding, manual geometry, snap)
         g_box = QGroupBox('Plot Box')
         bgl = QFormLayout(g_box)
-        bgl.setVerticalSpacing(4)
-        bgl.setContentsMargins(8, 6, 8, 6)
+        bgl.setVerticalSpacing(s(4))
+        bgl.setContentsMargins(s(8), s(6), s(8), s(6))
         bgl.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.spin_box_lw = FlatDoubleSpinBox()
         self.spin_box_lw.setRange(0.2, 6.0); self.spin_box_lw.setSingleStep(0.1)
         self.spin_box_lw.setDecimals(1); self.spin_box_lw.setValue(2.0)
         self.color_box = ColorButton('#000000')
-        _box_row = QHBoxLayout(); _box_row.setSpacing(4)
+        _box_row = QHBoxLayout(); _box_row.setSpacing(s(4))
         _box_row.addWidget(self.color_box); _box_row.addWidget(self.spin_box_lw)
         _box_w = QWidget(); _box_w.setLayout(_box_row)
         bgl.addRow('Color / lw', _box_w)
@@ -1408,7 +1571,7 @@ class ControlPanel(QScrollArea):
         # ── PL options
         self.g_pl = QGroupBox('PL Options')
         plgl = QVBoxLayout(self.g_pl)
-        plgl.setSpacing(9)
+        plgl.setSpacing(s(9))
         self.chk_pl_baseline = QCheckBox('Baseline subtract')
         self.chk_pl_baseline.setChecked(True)
         pl_note = QLabel('Matches the original PL MATLAB workflow: y = y - y(1).')
@@ -1421,7 +1584,7 @@ class ControlPanel(QScrollArea):
         # ── XRD options
         self.g_xrd = QGroupBox('XRD Options')
         xgl = QVBoxLayout(self.g_xrd)
-        xgl.setSpacing(9)
+        xgl.setSpacing(s(9))
         self.chk_d = QCheckBox('Convert 2θ → d-spacing (Å)')
         xgl.addWidget(self.chk_d)
         self.spin_lam = FlatDoubleSpinBox()
@@ -1445,14 +1608,20 @@ class ControlPanel(QScrollArea):
         xgl.addLayout(_labeled('Label gap', self.spin_xrd_label_gap))
 
         xgl.addWidget(_sep())
-        ref_lbl = QLabel('Reference traces (black, all panels):')
+        ref_lbl = QLabel('Reference traces (double-click on plot to recolour):')
         ref_lbl.setObjectName('fieldlbl')
         xgl.addWidget(ref_lbl)
         self.xrd_ref_list = QListWidget()
-        self.xrd_ref_list.setMaximumHeight(90)
+        self.xrd_ref_list.setMaximumHeight(s(90))
         self.xrd_ref_paths: list[str] = []
+        self.xrd_ref_colors: list[str] = []   # per-reference colour (double-click to change)
+        self.xrd_ref_labels: list[str] = []   # per-reference legend label
+        self.xrd_ref_widths: list = []        # per-reference line width override (None = global)
+        self.xrd_ref_styles: list[str] = []   # per-reference line style
+        self.xrd_ref_list.itemDoubleClicked.connect(
+            lambda item: self.edit_reference(self.xrd_ref_list.row(item)))
         xgl.addWidget(self.xrd_ref_list)
-        xrd_br = QHBoxLayout(); xrd_br.setSpacing(6)
+        xrd_br = QHBoxLayout(); xrd_br.setSpacing(s(6))
         self.btn_ref_add = QPushButton('+ Add Refs')
         self.btn_ref_add.setObjectName('secondary')
         self.btn_ref_rem = QPushButton('Remove')
@@ -1467,11 +1636,11 @@ class ControlPanel(QScrollArea):
         # ── Export
         g6 = QGroupBox('Export')
         egl = QVBoxLayout(g6)
-        egl.setSpacing(9)
+        egl.setSpacing(s(9))
         self.spin_dpi = FlatSpinBox()
         self.spin_dpi.setRange(72, 600); self.spin_dpi.setSingleStep(50); self.spin_dpi.setValue(300)
         egl.addLayout(_labeled('DPI', self.spin_dpi))
-        fmt_row = QHBoxLayout(); fmt_row.setSpacing(6)
+        fmt_row = QHBoxLayout(); fmt_row.setSpacing(s(6))
         for fmt in ('PNG', 'PDF', 'SVG'):
             b = QPushButton(fmt); b.setObjectName('secondary')
             b.clicked.connect(lambda checked, f=fmt.lower(): self._save(f))
@@ -1482,6 +1651,23 @@ class ControlPanel(QScrollArea):
         lay.addStretch()
 
         self._canvas = None
+        self.before_save = None   # MainWindow sets this to clear canvas selection pre-export
+
+        # Pressing Enter/Return in any spin box, line edit or combo pushes an
+        # immediate replot, so parameter tweaks apply without clicking Plot.
+        for w in (self.findChildren(QAbstractSpinBox)
+                  + self.findChildren(QLineEdit)
+                  + self.findChildren(QComboBox)):
+            w.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if (event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)):
+            if isinstance(obj, QAbstractSpinBox):
+                obj.interpretText()   # commit typed text to value() before plotting
+            self.plot_requested.emit()
+            return False
+        return super().eventFilter(obj, event)
 
     # ── Slots ──────────────────────────────────────────────────────────────────
 
@@ -1586,6 +1772,10 @@ class ControlPanel(QScrollArea):
         for p in paths:
             if p not in self.xrd_ref_paths:
                 self.xrd_ref_paths.append(p)
+                self.xrd_ref_colors.append('#000000')
+                self.xrd_ref_labels.append(clean_label(os.path.basename(p)))
+                self.xrd_ref_widths.append(None)
+                self.xrd_ref_styles.append('solid')
                 self.xrd_ref_list.addItem(clean_label(os.path.basename(p)))
 
     def _xrd_rem_refs(self):
@@ -1596,6 +1786,50 @@ class ControlPanel(QScrollArea):
         for r in rows:
             self.xrd_ref_list.takeItem(r)
             self.xrd_ref_paths.pop(r)
+            for lst in (self.xrd_ref_colors, self.xrd_ref_labels,
+                        self.xrd_ref_widths, self.xrd_ref_styles):
+                if r < len(lst):
+                    lst.pop(r)
+
+    def edit_reference(self, idx: int):
+        """Open the shared edit box for reference at `idx` (list or canvas)."""
+        if idx < 0 or idx >= len(self.xrd_ref_paths):
+            return
+        dlg = ReferenceEditDialog(idx, self, self)
+        if dlg.exec():
+            dlg.apply()
+            self.refresh_xrd_ref_list()
+            self.plot_requested.emit()
+
+    # ── canvas-edit write-backs (used by FigureEditor) ──────────────────────────
+    def find_trace_by_uid(self, uid: str):
+        for pw in self.panel_widgets:
+            for tr in pw.traces:
+                if tr.get('uid') == uid:
+                    return tr
+        return None
+    def set_trace_color_by_uid(self, uid: str, hexcol: str) -> bool:
+        """Recolour the trace with this uid (double-click on the plot)."""
+        for pw in self.panel_widgets:
+            for tr in pw.traces:
+                if tr.get('uid') == uid:
+                    tr['color'] = hexcol
+                    tr['use_auto_gradient_color'] = False
+                    return True
+        return False
+
+    def set_trace_label_by_uid(self, uid: str, label: str) -> bool:
+        for pw in self.panel_widgets:
+            for tr in pw.traces:
+                if tr.get('uid') == uid:
+                    tr['display_name'] = label
+                    return True
+        return False
+
+    def refresh_xrd_ref_list(self):
+        self.xrd_ref_list.clear()
+        for lbl in self.xrd_ref_labels:
+            self.xrd_ref_list.addItem(lbl)
 
     def _save(self, fmt: str):
         if self._canvas is None:
@@ -1605,11 +1839,153 @@ class ControlPanel(QScrollArea):
             f'{fmt.upper()} files (*.{fmt});;All files (*.*)'
         )
         if path:
+            if self.before_save:
+                self.before_save()   # strip on-canvas selection highlight before export
             try:
                 self._canvas.save(path, fmt, self.spin_dpi.value(),
                                   self.spin_fw.value() / 100, self.spin_fh.value() / 100)
             except Exception as e:
                 QMessageBox.critical(self, 'Save Error', str(e))
+
+    def reset_data(self):
+        """Clear every loaded data source (traces, IV sweeps, XRD references)
+        so a freshly added figure starts with an empty data box. Style settings
+        are intentionally left untouched."""
+        for pw in self.panel_widgets:
+            pw.clear()
+        for iv in self.iv_widgets:
+            iv.clear()
+        self.xrd_ref_paths.clear()
+        self.xrd_ref_colors.clear()
+        self.xrd_ref_labels.clear()
+        self.xrd_ref_widths.clear()
+        self.xrd_ref_styles.clear()
+        self.xrd_ref_list.clear()
+
+    def capture_data(self) -> dict:
+        """Snapshot a figure's full state — data AND style — so reselecting its
+        tab restores everything. Style reuses the preset machinery; axes and
+        labels (not part of presets) are captured here too."""
+        self._flush_xpanel()
+        return {
+            # ── Data ──
+            'n_panels': self.spin_panels.value(),
+            'panels': [pw.get_state() for pw in self.panel_widgets],
+            'n_iv': self.spin_iv_sets.value(),
+            'iv': [iv.get_state() for iv in self.iv_widgets],
+            'xrd_refs': list(self.xrd_ref_paths),
+            'xrd_ref_colors': list(self.xrd_ref_colors),
+            'xrd_ref_labels': list(self.xrd_ref_labels),
+            'xrd_ref_widths': list(self.xrd_ref_widths),
+            'xrd_ref_styles': list(self.xrd_ref_styles),
+            # ── Style (Plot Style dock + graph appearance) ──
+            'style': self._style_preset(),
+            # ── Axes (Build panel) ──
+            'axis': {
+                'auto_x': self.chk_auto_x.isChecked(),
+                'x_min': self.spin_xmin.value(),
+                'x_max': self.spin_xmax.value(),
+                'separate_x': self.chk_separate_x.isChecked(),
+                'panel_x': [dict(d) for d in self._panel_x],
+                'xpanel_idx': self._xpanel_idx,
+                'auto_y': self.chk_auto_y.isChecked(),
+                'y_min': self.spin_ymin.value(),
+                'y_max': self.spin_ymax.value(),
+                'share_y': self.chk_share_y.isChecked(),
+                'panel_gap': self.spin_gap.value(),
+            },
+            # ── Labels (Build panel) ──
+            'titles': {
+                'show_main': self.chk_main_title.isChecked(),
+                'main': self.edit_main_title.text(),
+                'show_sub': self.chk_subtitle.isChecked(),
+                'sub': self.edit_subtitle.text(),
+                'show_panel': self.chk_panel_titles.isChecked(),
+                'panel': self.edit_panel_titles.text(),
+            },
+        }
+
+    def restore_data(self, snap: dict):
+        """Reload a figure's full state from a capture_data() snapshot. A falsy
+        snapshot (e.g. a brand-new figure) resets to an empty data box while
+        leaving style at its defaults."""
+        if not snap:
+            self.reset_data()
+            return
+
+        def _val(w, v):
+            w.blockSignals(True); w.setValue(v); w.blockSignals(False)
+
+        def _chk(w, v):
+            w.blockSignals(True); w.setChecked(bool(v)); w.blockSignals(False)
+
+        def _txt(w, v):
+            w.blockSignals(True); w.setText(v); w.blockSignals(False)
+
+        # ── Data ──
+        _val(self.spin_panels, snap.get('n_panels', 1))
+        self._on_panels_change(self.spin_panels.value())
+        for pw, st in zip(self.panel_widgets, snap.get('panels', [])):
+            pw.set_state(st)
+        _val(self.spin_iv_sets, snap.get('n_iv', self.spin_iv_sets.value()))
+        self._on_iv_sets_change(self.spin_iv_sets.value())
+        for iv, st in zip(self.iv_widgets, snap.get('iv', [])):
+            iv.set_state(st)
+        self.xrd_ref_paths = list(snap.get('xrd_refs', []))
+        self.xrd_ref_colors = list(snap.get('xrd_ref_colors', []))
+        self.xrd_ref_labels = list(snap.get('xrd_ref_labels', []))
+        self.xrd_ref_widths = list(snap.get('xrd_ref_widths', []))
+        self.xrd_ref_styles = list(snap.get('xrd_ref_styles', []))
+        # Backfill parallel lists for older snapshots / mismatched lengths.
+        while len(self.xrd_ref_colors) < len(self.xrd_ref_paths):
+            self.xrd_ref_colors.append('#000000')
+        while len(self.xrd_ref_labels) < len(self.xrd_ref_paths):
+            self.xrd_ref_labels.append(
+                clean_label(os.path.basename(self.xrd_ref_paths[len(self.xrd_ref_labels)])))
+        while len(self.xrd_ref_widths) < len(self.xrd_ref_paths):
+            self.xrd_ref_widths.append(None)
+        while len(self.xrd_ref_styles) < len(self.xrd_ref_paths):
+            self.xrd_ref_styles.append('solid')
+        self.refresh_xrd_ref_list()
+
+        # ── Style ──
+        self._apply_style_preset(snap.get('style', {}))
+
+        # ── Axes ──
+        a = snap.get('axis', {})
+        _chk(self.chk_auto_x, a.get('auto_x', True))
+        _val(self.spin_xmin, a.get('x_min', 400.0))
+        _val(self.spin_xmax, a.get('x_max', 800.0))
+        _chk(self.chk_separate_x, a.get('separate_x', False))
+        self._panel_x = [dict(d) for d in a.get('panel_x', self._panel_x)]
+        self._xpanel_idx = a.get('xpanel_idx', 0)
+        self.combo_xpanel.blockSignals(True)
+        self.combo_xpanel.setCurrentIndex(self._xpanel_idx)
+        self.combo_xpanel.blockSignals(False)
+        _chk(self.chk_auto_y, a.get('auto_y', True))
+        _val(self.spin_ymin, a.get('y_min', 0.0))
+        _val(self.spin_ymax, a.get('y_max', 1.0))
+        _chk(self.chk_share_y, a.get('share_y', True))
+        _val(self.spin_gap, a.get('panel_gap', 0.30))
+
+        # ── Labels ──
+        t = snap.get('titles', {})
+        _chk(self.chk_main_title, t.get('show_main', False))
+        _txt(self.edit_main_title, t.get('main', ''))
+        _chk(self.chk_subtitle, t.get('show_sub', False))
+        _txt(self.edit_subtitle, t.get('sub', ''))
+        _chk(self.chk_panel_titles, t.get('show_panel', True))
+        _txt(self.edit_panel_titles, t.get('panel', ''))
+
+        # Refresh enable/visibility states that the blocked setters skipped.
+        self._toggle_separate_x(self.chk_separate_x.isChecked())
+        self._toggle_xlim()
+        self._toggle_ylim()
+        self._toggle_sci()
+        self._toggle_manual_box(self.chk_manual_box.isChecked())
+        self._toggle_legend()
+        if not self.chk_separate_x.isChecked():
+            self._load_xpanel(self._xpanel_idx)
 
     # ── Settings export ────────────────────────────────────────────────────────
 
@@ -1670,6 +2046,10 @@ class ControlPanel(QScrollArea):
             'legend_edge_color': self.color_legend_edge.hex(),
             'legend_edge_width': self.spin_legend_edge_w.value(),
             'legend_fontsize': self.spin_legend_fs.value(),
+            'legend_labelspacing': self.spin_legend_spacing.value(),
+            'legend_2col': self.chk_legend_2col.isChecked(),
+            'legend_alignment': self.combo_legend_align.currentText(),
+            'legend_markerfirst': self.chk_legend_markerfirst.isChecked(),
             'legend_peak_order': self.chk_legend_peak_order.isChecked(),
             'pl_baseline_correct': self.chk_pl_baseline.isChecked(),
             'xrd_d_spacing': self.chk_d.isChecked(),
@@ -1679,6 +2059,10 @@ class ControlPanel(QScrollArea):
             'xrd_margin_labels': self.chk_xrd_margin_labels.isChecked(),
             'xrd_margin_label_gap': self.spin_xrd_label_gap.value(),
             'xrd_ref_paths': list(self.xrd_ref_paths),
+            'xrd_ref_colors': list(self.xrd_ref_colors),
+            'xrd_ref_labels': list(self.xrd_ref_labels),
+            'xrd_ref_widths': list(self.xrd_ref_widths),
+            'xrd_ref_styles': list(self.xrd_ref_styles),
             # Graph appearance — font
             'font_family': self.combo_font.currentText(),
             # Ticks
@@ -1721,6 +2105,7 @@ class ControlPanel(QScrollArea):
         'show_legend', 'legend_loc', 'legend_transparent_bg', 'legend_bg_color',
         'legend_bg_alpha', 'legend_transparent_edge', 'legend_edge_color',
         'legend_edge_width', 'legend_fontsize', 'legend_peak_order',
+        'legend_alignment', 'legend_markerfirst', 'legend_labelspacing', 'legend_2col',
         'box_linewidth', 'box_color', 'manual_layout',
         'pa_width', 'pa_height', 'pa_left', 'pa_bottom', 'panel_gap',
         'snap_enabled', 'snap_step',
@@ -1750,6 +2135,7 @@ class ControlPanel(QScrollArea):
         if 'legend_bg_alpha'        in p: _set(self.spin_legend_alpha, p['legend_bg_alpha'])
         if 'legend_edge_width'      in p: _set(self.spin_legend_edge_w, p['legend_edge_width'])
         if 'legend_fontsize'        in p: _set(self.spin_legend_fs, p['legend_fontsize'])
+        if 'legend_labelspacing'    in p: _set(self.spin_legend_spacing, p['legend_labelspacing'])
         if 'pa_width'               in p: _set(self.spin_pa_w, p['pa_width'])
         if 'pa_height'              in p: _set(self.spin_pa_h, p['pa_height'])
         if 'pa_left'                in p: _set(self.spin_pa_left, p['pa_left'])
@@ -1772,6 +2158,8 @@ class ControlPanel(QScrollArea):
             (self.chk_legend_transp_bg,    'legend_transparent_bg'),
             (self.chk_legend_transp_edge,  'legend_transparent_edge'),
             (self.chk_legend_peak_order,   'legend_peak_order'),
+            (self.chk_legend_2col,         'legend_2col'),
+            (self.chk_legend_markerfirst,  'legend_markerfirst'),
             (self.chk_manual_box,          'manual_layout'),
             (self.chk_snap,                'snap_enabled'),
             (self.chk_pl_baseline,         'pl_baseline_correct'),
@@ -1787,6 +2175,7 @@ class ControlPanel(QScrollArea):
         if 'tick_dir'      in p: self.combo_tick_dir.setCurrentText(p['tick_dir'])
         if 'y_notation'    in p: self.combo_ynot.setCurrentText(p['y_notation'])
         if 'legend_loc'    in p: self.combo_legend_loc.setCurrentText(p['legend_loc'])
+        if 'legend_alignment' in p: self.combo_legend_align.setCurrentText(p['legend_alignment'])
         if 'font_family'   in p: self.combo_font.setCurrentText(p['font_family'])
         # Color buttons
         if 'box_color'         in p: self.color_box.set_hex(p['box_color'])
@@ -1828,10 +2217,10 @@ class TextEditDialog(QDialog):
         super().__init__(parent)
         self.artist = artist
         self.setWindowTitle('Edit text')
-        self.setMinimumWidth(320)
+        self.setMinimumWidth(s(320))
 
         form = QFormLayout(self)
-        form.setSpacing(10)
+        form.setSpacing(s(10))
 
         self.edit = QLineEdit(artist.get_text())
         form.addRow('Text', self.edit)
@@ -1867,17 +2256,43 @@ class TextEditDialog(QDialog):
 
 
 class LegendEditDialog(QDialog):
-    """Edit a matplotlib Legend frame: edge color, edge width, fill alpha, font."""
+    """Edit a matplotlib Legend: per-entry label text, alignment, marker side,
+    plus frame edge color/width, fill alpha and font."""
 
-    def __init__(self, legend, parent=None):
+    def __init__(self, legend, parent=None, controls=None):
         super().__init__(parent)
         self.legend = legend
+        self.controls = controls
+        self.needs_replot = False
         frame = legend.get_frame()
         self.setWindowTitle('Edit legend')
-        self.setMinimumWidth(320)
+        self.setMinimumWidth(s(320))
 
         form = QFormLayout(self)
-        form.setSpacing(10)
+        form.setSpacing(s(10))
+
+        # ── Per-entry label text ───────────────────────────────────────────────
+        self._sources = list(getattr(legend, '_spectra_sources', None) or [])
+        self.label_edits = []
+        for i, txt in enumerate(legend.get_texts()):
+            le = QLineEdit(txt.get_text())
+            self.label_edits.append(le)
+            form.addRow(f'Label {i + 1}', le)
+        if self.label_edits:
+            form.addRow(_sep())
+
+        # ── Layout: alignment + marker side ────────────────────────────────────
+        self.align = NoScrollComboBox()
+        self.align.addItems(['left', 'center', 'right'])
+        if controls is not None:
+            self.align.setCurrentText(controls.combo_legend_align.currentText())
+        form.addRow('Label align', self.align)
+
+        self.markerfirst = QCheckBox('Markers on left')
+        self.markerfirst.setChecked(
+            controls.chk_legend_markerfirst.isChecked() if controls is not None else True)
+        form.addRow('', self.markerfirst)
+        form.addRow(_sep())
 
         self.edge = ColorButton(to_hex(frame.get_edgecolor()))
         form.addRow('Edge color', self.edge)
@@ -1952,6 +2367,33 @@ class LegendEditDialog(QDialog):
         for t in self.legend.get_texts():
             t.set_fontsize(self.fs.value())
 
+        # Per-entry label text: apply in place and write back to the data sources.
+        for i, le in enumerate(self.label_edits):
+            new = le.text()
+            if i < len(self.legend.get_texts()):
+                self.legend.get_texts()[i].set_text(new)
+            if self.controls is not None and i < len(self._sources):
+                kind, key = self._sources[i]
+                if kind == 'trace':
+                    self.controls.set_trace_label_by_uid(key, new)
+                elif kind == 'xrdref' and 0 <= key < len(self.controls.xrd_ref_labels):
+                    self.controls.xrd_ref_labels[key] = new
+        if self.controls is not None:
+            self.controls.refresh_xrd_ref_list()
+
+        # Alignment + marker side live on the control panel; changing them needs a
+        # rebuild (matplotlib can't flip markerfirst on an existing legend).
+        if self.controls is not None:
+            new_align = self.align.currentText()
+            new_mf = self.markerfirst.isChecked()
+            if (new_align != self.controls.combo_legend_align.currentText()
+                    or new_mf != self.controls.chk_legend_markerfirst.isChecked()):
+                self.needs_replot = True
+            self.controls.combo_legend_align.setCurrentText(new_align)
+            self.controls.chk_legend_markerfirst.setChecked(new_mf)
+        if self.label_edits:
+            self.needs_replot = True   # ensure renamed labels survive future replots
+
 
 # ── Interactive figure editor ──────────────────────────────────────────────────
 
@@ -1983,14 +2425,26 @@ class FigureEditor:
       • double-click the legend to edit its frame (edge color/width, fill, font)
     """
 
+    _SEL_BBOX = dict(boxstyle='round,pad=0.25', facecolor='none',
+                     edgecolor='#1E88E5', linewidth=1.3)
+
     def __init__(self, canvas_widget):
         self.cw = canvas_widget
         self.canvas = canvas_widget.canvas
-        self._texts = []
+        self._texts = []                 # editable Text artists (current plot)
+        self._role_by_artist = {}        # id(artist) -> stable role str or None
         self._legends = []
-        self._drag = None      # (artist, press_disp_xy, artist_disp0, start_pos)
+        self._selected = []              # multi-selection of Text artists
+        self._drag = None                # dict while dragging
+        self._press = None               # dict between press and release
+        self._box_selected = False       # plot-box resize mode
+        self._box_artists = []           # overlay outline + handle patches
+        self._box_drag = None            # dict while resizing the plot box
         self.snap_enabled = False
-        self.snap_step = 0.01  # grid step in figure-relative (0–1) coordinates
+        self.snap_step = 0.01            # grid step in figure-relative coords
+        self.overrides = {}              # role -> {text,fontsize,color,bold,italic,pos}
+        self.controls = None             # ControlPanel, set by MainWindow
+        self.request_replot = None       # callable, set by MainWindow
         self.undo_stack = QUndoStack()
         self.canvas.mpl_connect('button_press_event', self._on_press)
         self.canvas.mpl_connect('motion_notify_event', self._on_motion)
@@ -2001,24 +2455,49 @@ class FigureEditor:
         if step and step > 0:
             self.snap_step = float(step)
 
-    # collect after every (re)plot
+    @staticmethod
+    def _mods():
+        m = QApplication.keyboardModifiers()
+        shift = bool(m & Qt.KeyboardModifier.ShiftModifier)
+        ctrl = bool(m & (Qt.KeyboardModifier.ControlModifier
+                         | Qt.KeyboardModifier.MetaModifier))
+        return shift, ctrl
+
+    # collect after every (re)plot, then re-apply persisted manual edits
     def refresh(self):
         fig = self.cw.fig
-        texts = []
+        texts, roles = [], {}
+
+        def add(artist, role):
+            texts.append(artist)
+            roles[id(artist)] = role
+
         sup = getattr(fig, '_suptitle', None)
         if sup is not None and sup.get_text():
-            texts.append(sup)
+            add(sup, 'suptitle')
+        sub_assigned = False
         for t in fig.texts:
-            if t.get_text():
-                texts.append(t)
-        for ax in fig.axes:
+            if not t.get_text():
+                continue
+            if t.get_gid() == 'xrd_margin_label':
+                add(t, None)            # auto-generated; draggable but not persisted
+            elif not sub_assigned:
+                add(t, 'subtitle'); sub_assigned = True
+            else:
+                add(t, None)
+        for pidx, ax in enumerate(fig.axes):
             if ax.get_title():
-                texts.append(ax.title)
+                add(ax.title, f'title:{pidx}')
             if ax.get_xlabel():
-                texts.append(ax.xaxis.label)
+                add(ax.xaxis.label, f'xlabel:{pidx}')
             if ax.get_ylabel():
-                texts.append(ax.yaxis.label)
+                add(ax.yaxis.label, f'ylabel:{pidx}')
         self._texts = texts
+        self._role_by_artist = roles
+        self._selected = []             # artists were recreated; drop stale selection
+        self._box_artists = []          # overlay was wiped by fig.clear()
+        self._box_selected = False
+        self._box_drag = None
 
         self._legends = [ax.get_legend() for ax in fig.axes if ax.get_legend() is not None]
         for leg in self._legends:
@@ -2027,9 +2506,28 @@ class FigureEditor:
             except Exception:
                 pass
 
+        self._apply_overrides()
+
+    def _apply_overrides(self):
+        """Re-apply manual figure edits after a rebuild so they survive replots."""
+        for artist in self._texts:
+            role = self._role_by_artist.get(id(artist))
+            ov = self.overrides.get(role) if role else None
+            if not ov:
+                continue
+            try:
+                if 'text' in ov:     artist.set_text(ov['text'])
+                if 'fontsize' in ov: artist.set_fontsize(ov['fontsize'])
+                if 'color' in ov:    artist.set_color(ov['color'])
+                if 'bold' in ov:     artist.set_fontweight('bold' if ov['bold'] else 'normal')
+                if 'italic' in ov:   artist.set_style('italic' if ov['italic'] else 'normal')
+                if 'pos' in ov:      artist.set_position(tuple(ov['pos']))
+            except Exception:
+                pass
+        self.canvas.draw_idle()
+
     # ── hit testing ──────────────────────────────────────────────────────────
     def _text_at(self, event):
-        # iterate in reverse so topmost wins
         for t in reversed(self._texts):
             try:
                 hit, _ = t.contains(event)
@@ -2049,6 +2547,182 @@ class FigureEditor:
                 return leg
         return None
 
+    def _line_at(self, event):
+        for ax in self.cw.fig.axes:
+            for ln in reversed(ax.lines):
+                if getattr(ln, '_spectra_src', None) is None:
+                    continue
+                try:
+                    hit, _ = ln.contains(event)
+                except Exception:
+                    hit = False
+                if hit:
+                    return ln
+        return None
+
+    # ── selection ──────────────────────────────────────────────────────────
+    def _highlight(self, a, on: bool):
+        try:
+            a.set_bbox(dict(self._SEL_BBOX) if on else None)
+        except Exception:
+            pass
+
+    def _set_selection(self, artists):
+        for a in self._selected:
+            self._highlight(a, False)
+        self._selected = []
+        for a in artists:
+            self._selected.append(a)
+            self._highlight(a, True)
+        self.canvas.draw_idle()
+
+    def _add_to_selection(self, a):
+        if a not in self._selected:
+            self._selected.append(a)
+            self._highlight(a, True)
+            self.canvas.draw_idle()
+
+    def _remove_from_selection(self, a):
+        if a in self._selected:
+            self._selected.remove(a)
+            self._highlight(a, False)
+            self.canvas.draw_idle()
+
+    def clear_selection(self):
+        if self._selected:
+            self._set_selection([])
+        if self._box_artists:
+            self._clear_box_handles()
+
+    # ── plot-box resize ──────────────────────────────────────────────────────
+    def _union_axes_rect(self):
+        axes = self.cw.fig.axes
+        if not axes:
+            return (0.10, 0.12, 0.84, 0.78)
+        x0 = min(ax.get_position().x0 for ax in axes)
+        y0 = min(ax.get_position().y0 for ax in axes)
+        x1 = max(ax.get_position().x1 for ax in axes)
+        y1 = max(ax.get_position().y1 for ax in axes)
+        return (x0, y0, x1 - x0, y1 - y0)
+
+    @staticmethod
+    def _handle_centers(rect):
+        l, b, w, h = rect
+        return {
+            'sw': (l, b),         'se': (l + w, b),
+            'nw': (l, b + h),     'ne': (l + w, b + h),
+            's':  (l + w / 2, b), 'n':  (l + w / 2, b + h),
+            'w':  (l, b + h / 2), 'e':  (l + w, b + h / 2),
+        }
+
+    def _current_box_rect(self):
+        if self._box_drag and 'rect' in self._box_drag:
+            return self._box_drag['rect']
+        return self._union_axes_rect()
+
+    def _show_box_handles(self, rect=None):
+        self._clear_box_handles()
+        fig = self.cw.fig
+        if rect is None:
+            rect = self._union_axes_rect()
+        l, b, w, h = rect
+        outline = Rectangle((l, b), w, h, transform=fig.transFigure, fill=False,
+                            edgecolor='#1E88E5', linewidth=1.2, linestyle='--', zorder=1000)
+        outline.set_gid('_resize_overlay')
+        fig.add_artist(outline)
+        self._box_artists = [outline]
+        size = 0.013
+        for _name, (fx, fy) in self._handle_centers(rect).items():
+            hb = Rectangle((fx - size / 2, fy - size / 2), size, size,
+                           transform=fig.transFigure, facecolor='white',
+                           edgecolor='#1E88E5', linewidth=1.2, zorder=1001)
+            hb.set_gid('_resize_overlay')
+            fig.add_artist(hb)
+            self._box_artists.append(hb)
+        self._box_selected = True
+        self.canvas.draw_idle()
+
+    def _clear_box_handles(self):
+        for a in self._box_artists:
+            try:
+                a.remove()
+            except Exception:
+                pass
+        self._box_artists = []
+        self._box_selected = False
+
+    def _handle_at(self, event):
+        if not self._box_selected:
+            return None
+        trans = self.cw.fig.transFigure
+        R = 8
+        for name, (fx, fy) in self._handle_centers(self._current_box_rect()).items():
+            cx, cy = trans.transform((fx, fy))
+            if abs(event.x - cx) <= R and abs(event.y - cy) <= R:
+                return name
+        return None
+
+    def _begin_box_drag(self, event, handle):
+        self._box_drag = {'handle': handle, 'press': (event.x, event.y),
+                          'rect0': self._union_axes_rect()}
+
+    def _apply_box_rect(self, rect):
+        fig = self.cw.fig
+        axes = list(fig.axes)
+        n = len(axes) or 1
+        gap = self.controls.spin_panel_gap.value() if self.controls else 0.04
+        l, b, w, h = rect
+        pw = max(0.02, (w - (n - 1) * gap) / n)
+        for j, ax in enumerate(axes):
+            ax.set_position([l + j * (pw + gap), b, pw, h])
+
+    def _update_box_drag(self, event):
+        fig = self.cw.fig
+        d = self._box_drag
+        l, b, w, h = d['rect0']
+        inv = fig.transFigure.inverted()
+        x0f, y0f = inv.transform(d['press'])
+        xf, yf = inv.transform((event.x, event.y))
+        dxf, dyf = xf - x0f, yf - y0f
+        hd = d['handle']
+        nl, nb, nw, nh = l, b, w, h
+        if 'w' in hd:
+            nl, nw = l + dxf, w - dxf
+        elif 'e' in hd:
+            nw = w + dxf
+        if 's' in hd:
+            nb, nh = b + dyf, h - dyf
+        elif 'n' in hd:
+            nh = h + dyf
+        if self.snap_enabled and self.snap_step > 0:
+            st = self.snap_step
+            nl = round(nl / st) * st; nb = round(nb / st) * st
+            nw = round(nw / st) * st; nh = round(nh / st) * st
+        nw = max(0.04, nw); nh = max(0.04, nh)
+        nl = min(max(0.0, nl), 0.96); nb = min(max(0.0, nb), 0.96)
+        if nl + nw > 1.0:
+            nw = 1.0 - nl
+        if nb + nh > 1.0:
+            nh = 1.0 - nb
+        rect = (nl, nb, nw, nh)
+        self._box_drag['rect'] = rect
+        self._apply_box_rect(rect)
+        self._show_box_handles(rect)
+
+    def _finish_box_drag(self):
+        d = self._box_drag
+        rect = d.get('rect', d['rect0'])
+        self._box_drag = None
+        if self.controls is not None:
+            c = self.controls
+            for wdg, val in ((c.spin_pa_left, rect[0]), (c.spin_pa_bottom, rect[1]),
+                             (c.spin_pa_w, rect[2]), (c.spin_pa_h, rect[3])):
+                wdg.blockSignals(True); wdg.setValue(val); wdg.blockSignals(False)
+            if not c.chk_manual_box.isChecked():
+                c.chk_manual_box.setChecked(True)   # makes the geometry stick on replot
+        if self.request_replot:
+            self.request_replot()
+
     # ── events ──────────────────────────────────────────────────────────────
     def _on_press(self, event):
         if event.x is None or event.y is None:
@@ -2056,68 +2730,196 @@ class FigureEditor:
         if event.dblclick:
             t = self._text_at(event)
             if t is not None:
-                self._edit_text(t)
-                return
+                self._edit_text(t); return
             leg = self._legend_at(event)
             if leg is not None:
-                self._edit_legend(leg)
+                self._edit_legend(leg); return
+            ln = self._line_at(event)
+            if ln is not None:
+                self._edit_line(ln); return
             return
         if event.button != 1:
             return
-        # start dragging a text (legends drag themselves via mpl)
+        shift, ctrl = self._mods()
+        # plot-box resize handle takes priority once the box is selected
+        if self._box_selected:
+            hd = self._handle_at(event)
+            if hd is not None:
+                self._begin_box_drag(event, hd)
+                self._press = None
+                return
         t = self._text_at(event)
         if t is not None and self._legend_at(event) is None:
-            x0, y0 = t.get_transform().transform(t.get_position())
-            start_pos = tuple(t.get_position())
-            self._drag = (t, (event.x, event.y), (x0, y0), start_pos)
+            self._clear_box_handles()
+            was = t in self._selected
+            if shift or ctrl:
+                if not was:
+                    self._add_to_selection(t)   # ensure it joins the group drag
+            else:
+                if not was:
+                    self._set_selection([t])
+            self._press = {'artist': t, 'shift': shift, 'ctrl': ctrl,
+                           'was': was, 'moved': False}
+            self._begin_drag(event)
+            return
+        if self._legend_at(event) is not None:
+            self._press = None
+            return
+        # click inside the plot area → select the plot box (show resize handles)
+        if getattr(event, 'inaxes', None) is not None:
+            self.clear_selection()
+            self._show_box_handles()
+            self._press = None
+            return
+        # empty space → clear text selection and the box overlay
+        if not (shift or ctrl):
+            self.clear_selection()
+        self._clear_box_handles()
+        self.canvas.draw_idle()
+        self._press = None
+
+    def _begin_drag(self, event):
+        items = []
+        for a in self._selected:
+            x0, y0 = a.get_transform().transform(a.get_position())
+            items.append((a, (x0, y0), tuple(a.get_position())))
+        self._drag = {'press': (event.x, event.y), 'items': items}
+
+    _HANDLE_CURSOR = {
+        'nw': Qt.CursorShape.SizeFDiagCursor, 'se': Qt.CursorShape.SizeFDiagCursor,
+        'ne': Qt.CursorShape.SizeBDiagCursor, 'sw': Qt.CursorShape.SizeBDiagCursor,
+        'n': Qt.CursorShape.SizeVerCursor, 's': Qt.CursorShape.SizeVerCursor,
+        'e': Qt.CursorShape.SizeHorCursor, 'w': Qt.CursorShape.SizeHorCursor,
+    }
 
     def _on_motion(self, event):
-        if self._drag is not None:
-            t, (px, py), (x0, y0), _start = self._drag
-            if event.x is None:
-                return
-            newdisp = (x0 + (event.x - px), y0 + (event.y - py))
-            # Snap the target to a grid in figure-relative coordinates.
-            if self.snap_enabled and self.snap_step > 0:
-                fig = self.cw.fig
-                fx, fy = fig.transFigure.inverted().transform(newdisp)
-                step = self.snap_step
-                fx = round(fx / step) * step
-                fy = round(fy / step) * step
-                newdisp = fig.transFigure.transform((fx, fy))
-            newpos = t.get_transform().inverted().transform(newdisp)
-            t.set_position(tuple(newpos))
+        if self._box_drag is not None and event.x is not None:
+            self._update_box_drag(event)
+            return
+        if self._drag is not None and event.x is not None:
+            if self._press is not None:
+                self._press['moved'] = True
+            shift, _ = self._mods()
+            dx = event.x - self._drag['press'][0]
+            dy = event.y - self._drag['press'][1]
+            if shift:                       # constrain to a straight line
+                if abs(dx) >= abs(dy):
+                    dy = 0
+                else:
+                    dx = 0
+            for a, (x0, y0), _start in self._drag['items']:
+                newdisp = (x0 + dx, y0 + dy)
+                if self.snap_enabled and self.snap_step > 0:
+                    fig = self.cw.fig
+                    fx, fy = fig.transFigure.inverted().transform(newdisp)
+                    step = self.snap_step
+                    fx = round(fx / step) * step
+                    fy = round(fy / step) * step
+                    newdisp = fig.transFigure.transform((fx, fy))
+                newpos = a.get_transform().inverted().transform(newdisp)
+                a.set_position(tuple(newpos))
             self.canvas.draw_idle()
             return
-        # NOTE: legends drag via matplotlib's own handler (set_draggable), which
-        # we can't easily intercept for snapping; custom text snaps as above.
-        # hover cursor feedback
         if event.x is None:
             return
-        over = (self._text_at(event) is not None) or (self._legend_at(event) is not None)
+        if self._box_selected:
+            hd = self._handle_at(event)
+            if hd is not None:
+                self.canvas.setCursor(QCursor(self._HANDLE_CURSOR[hd]))
+                return
+        over = (self._text_at(event) is not None
+                or self._legend_at(event) is not None
+                or self._line_at(event) is not None)
         self.canvas.setCursor(
             QCursor(Qt.CursorShape.OpenHandCursor if over else Qt.CursorShape.ArrowCursor))
 
     def _on_release(self, event):
-        if self._drag is not None:
-            t, start_pos = self._drag[0], self._drag[3]
-            end_pos = tuple(t.get_position())
-            if end_pos != start_pos:
-                self.undo_stack.push(_MoveCommand(t, start_pos, end_pos, self.canvas))
+        if self._box_drag is not None:
+            self._finish_box_drag()
+            self._press = None
+            return
+        moved = bool(self._press and self._press.get('moved'))
+        if self._drag is not None and moved:
+            self.undo_stack.beginMacro('Move')
+            for a, _disp0, start in self._drag['items']:
+                end = tuple(a.get_position())
+                if end != start:
+                    self.undo_stack.push(_MoveCommand(a, start, end, self.canvas))
+                role = self._role_by_artist.get(id(a))
+                if role:
+                    self.overrides.setdefault(role, {})['pos'] = tuple(a.get_position())
+            self.undo_stack.endMacro()
+        elif self._press is not None and not moved:
+            t = self._press['artist']
+            if self._press['shift'] or self._press['ctrl']:
+                if self._press['was']:
+                    self._remove_from_selection(t)   # toggle off on plain click
+            else:
+                self._set_selection([t])
         self._drag = None
+        self._press = None
 
     # ── editors ────────────────────────────────────────────────────────────
     def _edit_text(self, t):
         dlg = TextEditDialog(t, self.cw)
         if dlg.exec():
             dlg.apply()
+            self._capture_text_override(t)
+            self._sync_text_to_controls(t)
             self.canvas.draw_idle()
 
+    def _capture_text_override(self, t):
+        role = self._role_by_artist.get(id(t))
+        if not role:
+            return
+        ov = self.overrides.setdefault(role, {})
+        ov['text'] = t.get_text()
+        ov['fontsize'] = float(t.get_fontsize())
+        ov['color'] = to_hex(t.get_color())
+        ov['bold'] = str(t.get_fontweight()) in ('bold', '700', 'heavy', 'semibold')
+        ov['italic'] = t.get_style() == 'italic'
+
+    def _sync_text_to_controls(self, t):
+        """Mirror edited title/subtitle text back into the left-panel fields."""
+        role = self._role_by_artist.get(id(t))
+        if not role or self.controls is None:
+            return
+        target = None
+        if role == 'suptitle':
+            target = self.controls.edit_main_title
+        elif role == 'subtitle':
+            target = self.controls.edit_subtitle
+        if target is not None:
+            target.blockSignals(True)
+            target.setText(t.get_text())
+            target.blockSignals(False)
+
+    def _edit_line(self, ln):
+        """Double-click a plotted line → full edit box (shared with the list boxes)."""
+        src = getattr(ln, '_spectra_src', None)
+        if src is None or self.controls is None:
+            return
+        kind, key = src
+        if kind == 'xrdref':
+            self.controls.edit_reference(key)   # opens ReferenceEditDialog and replots
+            return
+        if kind == 'trace':
+            tr = self.controls.find_trace_by_uid(key)
+            if tr is None:
+                return
+            dlg = TraceEditDialog(tr, self.cw)
+            if dlg.exec():
+                dlg.apply()
+                if self.request_replot:
+                    self.request_replot()
+
     def _edit_legend(self, leg):
-        dlg = LegendEditDialog(leg, self.cw)
+        dlg = LegendEditDialog(leg, self.cw, controls=self.controls)
         if dlg.exec():
             dlg.apply()
             self.canvas.draw_idle()
+            if dlg.needs_replot and self.request_replot:
+                self.request_replot()
 
 
 # ── Plot canvas ───────────────────────────────────────────────────────────────
@@ -2130,7 +2932,7 @@ class PlotCanvas(QWidget):
         super().__init__(parent)
         self.setObjectName('canvasArea')
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 14, 14, 8)
+        lay.setContentsMargins(s(14), s(14), s(14), s(8))
         lay.setSpacing(0)
 
         self.card = QWidget()
@@ -2138,8 +2940,8 @@ class PlotCanvas(QWidget):
         self.card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         add_shadow(self.card, blur=32, y=10, alpha=28)
         card_lay = QVBoxLayout(self.card)
-        card_lay.setContentsMargins(10, 10, 10, 10)
-        card_lay.setSpacing(10)
+        card_lay.setContentsMargins(s(10), s(10), s(10), s(10))
+        card_lay.setSpacing(s(10))
 
         self.fig = Figure(facecolor='white', dpi=self.DISPLAY_DPI)
         self.canvas = FigureCanvasQTAgg(self.fig)
@@ -2153,7 +2955,7 @@ class PlotCanvas(QWidget):
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
         sep.setFrameShadow(QFrame.Shadow.Sunken)
-        sep.setFixedWidth(1)
+        sep.setFixedWidth(s(1))
         sep.setStyleSheet('background: #B8C5D3;')
         self.toolbar.addWidget(sep)
 
@@ -2181,17 +2983,20 @@ class PlotCanvas(QWidget):
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.VLine)
         sep2.setFrameShadow(QFrame.Shadow.Sunken)
-        sep2.setFixedWidth(1)
+        sep2.setFixedWidth(s(1))
         sep2.setStyleSheet('background: #B8C5D3;')
         self.toolbar.addWidget(sep2)
 
         self.btn_zoom_out = QToolButton()
         self.btn_zoom_out.setText('−')
-        self.btn_zoom_out.setToolTip('Zoom out')
+        self.btn_zoom_out.setToolTip('Zoom out (visual only — does not change data or export)')
+        self.btn_zoom_reset = QToolButton()
+        self.btn_zoom_reset.setText('100%')
+        self.btn_zoom_reset.setToolTip('Reset zoom to 100%')
         self.btn_zoom_in = QToolButton()
         self.btn_zoom_in.setText('+')
-        self.btn_zoom_in.setToolTip('Zoom in')
-        for _b in (self.btn_zoom_out, self.btn_zoom_in):
+        self.btn_zoom_in.setToolTip('Zoom in (visual only — does not change data or export)')
+        for _b in (self.btn_zoom_out, self.btn_zoom_reset, self.btn_zoom_in):
             _b.setObjectName('figToolbarBtn')
             self.toolbar.addWidget(_b)
 
@@ -2200,11 +3005,10 @@ class PlotCanvas(QWidget):
         self.btn_grid.toggled.connect(self._toolbar_grid)
         self.btn_update_size.clicked.connect(lambda _checked=False: self.size_update_requested.emit())
         self.btn_save_fig.clicked.connect(self.toolbar.save_figure)
-        self.btn_zoom_out.clicked.connect(lambda: self._zoom_by(1 / 1.25))
-        self.btn_zoom_in.clicked.connect(lambda: self._zoom_by(1.25))
-
-        # scroll-to-zoom on the matplotlib canvas widget
-        self.canvas.wheelEvent = self._wheel_zoom
+        self._view_scale = 1.0
+        self.btn_zoom_out.clicked.connect(lambda: self.set_view_scale(self._view_scale / 1.25))
+        self.btn_zoom_in.clicked.connect(lambda: self.set_view_scale(self._view_scale * 1.25))
+        self.btn_zoom_reset.clicked.connect(lambda: self.set_view_scale(1.0))
 
         card_lay.addWidget(self.toolbar)
 
@@ -2218,7 +3022,7 @@ class PlotCanvas(QWidget):
         holder = QWidget()
         holder.setObjectName('canvasHolder')
         hv = QVBoxLayout(holder)
-        hv.setContentsMargins(20, 20, 20, 20)
+        hv.setContentsMargins(s(20), s(20), s(20), s(20))
         hv.addStretch()
         hrow = QHBoxLayout()
         hrow.addStretch()
@@ -2244,60 +3048,39 @@ class PlotCanvas(QWidget):
             ax.grid(checked, linestyle='--', linewidth=0.5, alpha=0.5, color='#94A3B8')
         self.canvas.draw_idle()
 
-    def _zoom_by(self, factor: float, cx: float = None, cy: float = None):
-        for ax in self.fig.axes:
-            xlim = ax.get_xlim()
-            ylim = ax.get_ylim()
-            xc = cx if cx is not None else (xlim[0] + xlim[1]) / 2
-            yc = cy if cy is not None else (ylim[0] + ylim[1]) / 2
-            xw = (xlim[1] - xlim[0]) / factor / 2
-            yw = (ylim[1] - ylim[0]) / factor / 2
-            ax.set_xlim(xc - xw, xc + xw)
-            ax.set_ylim(yc - yw, yc + yw)
-        self.canvas.draw_idle()
-
-    def _wheel_zoom(self, event):
-        delta = event.angleDelta().y()
-        if delta == 0 or not self.fig.axes:
-            event.ignore()
-            return
-        factor = 1.15 if delta > 0 else 1 / 1.15
-        # map cursor to data coordinates on the first axes
-        ax = self.fig.axes[0]
-        try:
-            pos = event.position()
-            x_disp = pos.x()
-            y_disp = self.canvas.height() - pos.y()
-            pt = ax.transData.inverted().transform([x_disp, y_disp])
-            cx, cy = float(pt[0]), float(pt[1])
-            xl, xr = ax.get_xlim()
-            yb, yt = ax.get_ylim()
-            if not (xl <= cx <= xr and yb <= cy <= yt):
-                cx, cy = None, None
-        except Exception:
-            cx, cy = None, None
-        self._zoom_by(factor, cx, cy)
-        event.accept()
-
     def set_fig_size(self, w_in: float, h_in: float):
-        """Lock both the matplotlib figure and the on-screen widget to a fixed size."""
-        width_px = int(round(w_in * self.DISPLAY_DPI))
-        height_px = int(round(h_in * self.DISPLAY_DPI))
-        requested_px = (width_px, height_px)
-        if requested_px == self.applied_size_pixels():
-            self.mark_size_pending(False)
-            return
-
-        # Qt's resizeEvent recalculates figure size as:
-        #   w_inches = (logical_px * devicePixelRatio) / figure.dpi
-        # On Retina/HiDPI screens devicePixelRatio > 1, so we must scale the
-        # DPI by the same factor to keep w_inches = w_in after the event fires.
-        dpr = self.canvas.devicePixelRatioF() or 1.0
-        self.fig.set_dpi(self.DISPLAY_DPI * dpr)
+        """Set the figure's true (export) size in inches, then lay it out on
+        screen at the current view scale."""
+        self._fig_w_in = w_in
+        self._fig_h_in = h_in
         self.fig.set_size_inches(w_in, h_in)
-        self.canvas.setFixedSize(width_px, height_px)
-        self._applied_size_px = requested_px
+        self._apply_display_size()
+        # Logical (unscaled) pixels track the requested figure size for the
+        # pending-size ("Update") bookkeeping; the view scale never affects it.
+        self._applied_size_px = (int(round(w_in * self.DISPLAY_DPI)),
+                                 int(round(h_in * self.DISPLAY_DPI)))
         self.mark_size_pending(False)
+
+    def set_view_scale(self, z: float):
+        """Visually scale the WHOLE figure on screen (zoom for viewing only).
+        Does not change data limits, figure inches, or exported output."""
+        self._view_scale = max(0.2, min(3.0, round(z, 3)))
+        self._apply_display_size()
+        self.btn_zoom_reset.setText(f'{int(round(self._view_scale * 100))}%')
+
+    def _apply_display_size(self):
+        """Resize the on-screen canvas to figure_inches × DISPLAY_DPI × view_scale.
+        figure.set_size_inches stays at the true size so export is unaffected.
+        DPI is scaled by view_scale × devicePixelRatio so Qt's resizeEvent
+        (w_in = logical_px·dpr / dpi) keeps the inch size stable."""
+        w_in = getattr(self, '_fig_w_in', 8.0)
+        h_in = getattr(self, '_fig_h_in', 5.0)
+        z = getattr(self, '_view_scale', 1.0)
+        dpr = self.canvas.devicePixelRatioF() or 1.0
+        self.fig.set_dpi(self.DISPLAY_DPI * z * dpr)
+        self.canvas.setFixedSize(int(round(w_in * self.DISPLAY_DPI * z)),
+                                 int(round(h_in * self.DISPLAY_DPI * z)))
+        self.canvas.draw_idle()
 
     def applied_size_pixels(self) -> tuple[int, int]:
         return getattr(self, '_applied_size_px', (self.canvas.width(), self.canvas.height()))
@@ -2339,6 +3122,16 @@ def _apply_font(s: dict):
         matplotlib.rcParams['font.family'] = [fam, 'Arial', 'DejaVu Sans']
     except Exception:
         matplotlib.rcParams['font.family'] = 'Arial'
+
+
+def _mathify(text: str) -> str:
+    """Wrap label in $...$ if it contains TeX sub/superscript notation (_{} or ^{})."""
+    if not text or ('_{' not in text and '^{' not in text):
+        return text
+    stripped = text.strip()
+    if stripped.startswith('$') and stripped.endswith('$') and stripped.count('$') == 2:
+        return text
+    return f'${text}$'
 
 
 def _apply_y_notation(ax, s: dict):
@@ -2409,19 +3202,28 @@ def _style_ax(ax, is_left: bool, xlabel: str, ylabel: str, s: dict):
     else:
         ax.minorticks_off()
 
-    ax.set_xlabel(xlabel, fontsize=fontsize, color='black', labelpad=7)
+    ax.set_xlabel(_mathify(xlabel), fontsize=fontsize, color='black', labelpad=7)
     if is_left:
-        ax.set_ylabel(ylabel, fontsize=fontsize, color='black', labelpad=7)
+        ax.set_ylabel(_mathify(ylabel), fontsize=fontsize, color='black', labelpad=7)
     else:
         ax.set_ylabel('')
 
 
-def _add_legend(ax, handles: list, labels: list, s: dict):
+def _add_legend(ax, handles: list, labels: list, s: dict, sources=None):
     if not s['show_legend'] or not handles:
         return
     fs = s.get('legend_fontsize', max(6, s['fontsize'] - 1))
+    _ls = s.get('legend_labelspacing', 0.25)
+    labelspacing = _ls * (10.0 / max(fs, 6.0))  # normalise to 10pt so gap stays constant as font scales
+    ncols = 2 if s.get('legend_2col', False) else 1
+    markerfirst = s.get('legend_markerfirst', True)   # False = flip markers to the right
+    alignment = s.get('legend_alignment', 'left')
+    labels = [_mathify(l) for l in labels]
     leg = ax.legend(handles, labels, loc=s['legend_loc'],
-                    fontsize=fs, fancybox=False, labelspacing=0.25)
+                    fontsize=fs, fancybox=False, labelspacing=labelspacing,
+                    ncols=ncols, markerfirst=markerfirst, alignment=alignment)
+    # Remember what each entry maps back to, so the legend editor can rename them.
+    leg._spectra_sources = list(sources) if sources else None
     frame = leg.get_frame()
     # Background — transparent by default.
     if s.get('legend_transparent_bg', True):
@@ -2445,7 +3247,7 @@ def _add_legend(ax, handles: list, labels: list, s: dict):
 
 def _panel_title(ax, idx: int, s: dict):
     if s['show_panel_titles'] and idx < len(s['panel_titles']):
-        ax.set_title(s['panel_titles'][idx],
+        ax.set_title(_mathify(s['panel_titles'][idx]),
                      fontsize=s['fontsize'], fontweight='bold', color='black', pad=6)
 
 
@@ -2564,11 +3366,12 @@ def _plot_pl(axes: list, s: dict) -> int:
 
         use_grad = panel.get('use_gradient', True)
         colors = make_gradient(*panel['gradient'], len(corrected)) if use_grad else None
-        entries = []  # (peak, add_idx, handle, label) for legend ordering
+        entries = []  # (peak, add_idx, handle, label, src) for legend ordering
         for k, (x, y, peak, tr, add_idx) in enumerate(corrected):
             color, lw, lstyle = _trace_visual(tr, colors, k, use_grad, s['linewidth'])
             ln, = ax.plot(x, y, linewidth=lw, color=color, linestyle=lstyle)
-            entries.append((peak, add_idx, ln, tr['display_name']))
+            ln._spectra_src = ('trace', tr.get('uid'))
+            entries.append((peak, add_idx, ln, tr['display_name'], ('trace', tr.get('uid'))))
 
         # Legend order is independent of plot order: by peak (high→low) or add order.
         if s.get('legend_peak_order', True):
@@ -2577,10 +3380,11 @@ def _plot_pl(axes: list, s: dict) -> int:
             legend_order = sorted(entries, key=lambda e: e[1])
         hs = [e[2] for e in legend_order]
         ls = [e[3] for e in legend_order]
+        srcs = [e[4] for e in legend_order]
 
         ylabel = 'Baseline-corrected PL' if baseline_correct else 'PL intensity'
         _style_ax(ax, i == 0, 'Wavelength λ (nm)', ylabel, s)
-        _add_legend(ax, hs, ls, s)
+        _add_legend(ax, hs, ls, s, srcs)
         _panel_title(ax, i, s)
     return total_failed
 
@@ -2598,14 +3402,15 @@ def _plot_absorbance(axes: list, s: dict) -> int:
 
         use_grad = panel.get('use_gradient', True)
         colors = make_gradient(*panel['gradient'], len(with_pk)) if use_grad else None
-        hs, ls = [], []
+        hs, ls, srcs = [], [], []
         for k, (x, y, _, tr) in enumerate(with_pk):
             color, lw, lstyle = _trace_visual(tr, colors, k, use_grad, s['linewidth'])
             ln, = ax.plot(x, y, linewidth=lw, color=color, linestyle=lstyle)
-            hs.append(ln); ls.append(tr['display_name'])
+            ln._spectra_src = ('trace', tr.get('uid'))
+            hs.append(ln); ls.append(tr['display_name']); srcs.append(('trace', tr.get('uid')))
 
         _style_ax(ax, i == 0, 'Wavelength λ (nm)', ylabel, s)
-        _add_legend(ax, hs, ls, s)
+        _add_legend(ax, hs, ls, s, srcs)
         _panel_title(ax, i, s)
     return total_failed
 
@@ -2624,12 +3429,21 @@ def _plot_xrd(axes: list, s: dict) -> int:
         order = np.argsort(d)
         return d[order], y[order]
 
+    ref_colors = s.get('xrd_ref_colors', [])
+    ref_labels = s.get('xrd_ref_labels', [])
+    ref_widths = s.get('xrd_ref_widths', [])
+    ref_styles = s.get('xrd_ref_styles', [])
     ref_traces = []
-    for path in s['xrd_ref_paths']:
+    for idx, path in enumerate(s['xrd_ref_paths']):
         x, y = load_file(path)
         if x is not None:
             x, y = maybe_convert(x, y)
-            ref_traces.append((x, y, clean_label(os.path.basename(path))))
+            lbl = ref_labels[idx] if idx < len(ref_labels) else clean_label(os.path.basename(path))
+            col = ref_colors[idx] if idx < len(ref_colors) else '#000000'
+            rw = ref_widths[idx] if idx < len(ref_widths) else None
+            rw = float(rw) if rw is not None else s['linewidth']
+            rls = LINESTYLE_MAP.get(ref_styles[idx] if idx < len(ref_styles) else 'solid', '-')
+            ref_traces.append((x, y, lbl, col, idx, rw, rls))
         else:
             total_failed += 1
 
@@ -2651,24 +3465,27 @@ def _plot_xrd(axes: list, s: dict) -> int:
 
         use_grad = panel.get('use_gradient', True)
         exp_colors = make_gradient(*panel['gradient'], n_exp) if use_grad else None
-        hs, ls = [], []
-        for k, (x, y, lbl) in enumerate(ref_traces):
+        hs, ls, srcs = [], [], []
+        for k, (x, y, lbl, col, ridx, rw, rls) in enumerate(ref_traces):
             ln, = ax.plot(
                 x, y + offsets[k],
-                linewidth=s['linewidth'],
-                color='black',
+                linewidth=rw,
+                linestyle=rls,
+                color=col,
                 label=lbl,
             )
-            hs.append(ln); ls.append(lbl)
+            ln._spectra_src = ('xrdref', ridx)
+            hs.append(ln); ls.append(lbl); srcs.append(('xrdref', ridx))
         for k, (x, y, tr) in enumerate(exp_traces):
             color, lw, lstyle = _trace_visual(tr, exp_colors, k, use_grad, s['linewidth'])
             ln, = ax.plot(x, y + offsets[n_ref + k], linewidth=lw,
                           color=color, linestyle=lstyle, label=tr['display_name'])
-            hs.append(ln); ls.append(tr['display_name'])
+            ln._spectra_src = ('trace', tr.get('uid'))
+            hs.append(ln); ls.append(tr['display_name']); srcs.append(('trace', tr.get('uid')))
 
         xlabel = 'd-spacing (Å)' if use_d else '2θ (°)'
         _style_ax(ax, i == 0, xlabel, 'Intensity', s)
-        _add_legend(ax, hs, ls, s)
+        _add_legend(ax, hs, ls, s, srcs)
         _panel_title(ax, i, s)
         if use_d:
             ax.invert_xaxis()
@@ -2787,11 +3604,11 @@ def do_plot(fig: Figure, s: dict) -> str:
     if has_title or has_sub:
         top_rect = 0.86
         if has_title:
-            fig.suptitle(s['main_title'], fontsize=s['fontsize'] + 2,
+            fig.suptitle(_mathify(s['main_title']), fontsize=s['fontsize'] + 2,
                          fontweight='bold', color='black', y=0.98)
         if has_sub:
             ysub = 0.945 if has_title else 0.975
-            fig.text(0.5, ysub, s['subtitle'], fontsize=s['fontsize'],
+            fig.text(0.5, ysub, _mathify(s['subtitle']), fontsize=s['fontsize'],
                      color='#555', ha='center', va='top')
 
     if s.get('manual_layout', False):
@@ -2869,7 +3686,7 @@ def do_plot(fig: Figure, s: dict) -> str:
 # ── Main window ───────────────────────────────────────────────────────────────
 
 def create_loading_screen() -> QSplashScreen:
-    pixmap = QPixmap(440, 240)
+    pixmap = QPixmap(s(760), s(740))
     pixmap.fill(QColor('#FFFFFF'))
 
     splash = QSplashScreen(pixmap)
@@ -2878,25 +3695,108 @@ def create_loading_screen() -> QSplashScreen:
     splash.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
     layout = QVBoxLayout(splash)
-    layout.setContentsMargins(34, 30, 34, 28)
-    layout.setSpacing(10)
+    layout.setContentsMargins(s(40), s(30), s(40), s(28))
+    layout.setSpacing(s(10))
 
-    title = QLabel('SPECTRAplot')
+    # ── Hero image (assets/loading.png, optional)
+    img_path = resource_path('assets', 'loading.png')
+    if os.path.isfile(img_path):
+        img_lbl = QLabel()
+        img_lbl.setObjectName('loadingImage')
+        img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Render at the screen's native pixel density so it stays crisp on Retina
+        scr = QApplication.primaryScreen()
+        dpr = scr.devicePixelRatio() if scr else 1.0
+        target_w = s(680)
+        pix = QPixmap(img_path).scaledToWidth(
+            int(target_w * dpr), Qt.TransformationMode.SmoothTransformation)
+        pix.setDevicePixelRatio(dpr)
+        img_lbl.setPixmap(pix)
+        layout.addWidget(img_lbl)
+
+    # SPECTRA (extrabold) + plot (light), big, in Montserrat
+    ff = spectra_theme.UI_FONT_FAMILY
+    title = QLabel()
     title.setObjectName('loadingTitle')
+    title.setTextFormat(Qt.TextFormat.RichText)
     title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    title.setText(
+        f'<span style="font-family:{ff};font-size:{s(56)}px;font-weight:800;'
+        f'color:#171717;">SPECTRA</span>'
+        f'<span style="font-family:{ff};font-size:{s(56)}px;font-weight:300;'
+        f'color:#5F5F5F;">plot</span>'
+    )
 
     subtitle = QLabel('PL  ·  ABSORBANCE  ·  XRD  ·  IV')
     subtitle.setObjectName('loadingSubtitle')
     subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-    status = QLabel('Preparing plotting workspace...')
+    status = QLabel('preparing plotting workspace...')
     status.setObjectName('loadingStatus')
     status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    # cycle through a few (lowercase) loading quips while the splash is up
+    _quips = [
+        'calibrating the diffractometer...',
+        "summoning bragg's law...",
+        'aligning the x-rays (do not look directly)...',
+        'fitting gaussians nobody asked for...',
+        'bribing matplotlib to cooperate...',
+        # material science
+        'annealing your grain boundaries...',
+        'indexing miller planes...',
+        'quenching the melt a little too fast...',
+        'measuring band gaps you cannot afford...',
+        'doping the lattice (academically)...',
+        'blaming everything on surface defects...',
+        'pretending the peak shift is not thermal expansion...',
+        'chasing a phase that is only metastable...',
+        # semiconductor
+        'passivating dangling bonds, mostly...',
+        'recombining carriers nonradiatively...',
+        'spin-coating until the substrate gives up...',
+        'tunneling through a barrier we promised was thick...',
+        'counting traps in the band gap...',
+        'blaming the mobility on the substrate...',
+        # polymer
+        'untangling polymer chains...',
+        'glass transition pending, please wait...',
+        'measuring a polydispersity we will not report...',
+        'degrading under uv, as designed...',
+        # dark humour
+        'absorbing more radiation than the sample...',
+        'voiding the warranty on your instruments...',
+        'normalizing data until it agrees with the hypothesis...',
+        'this run will outlive your funding...',
+        'crystallizing slower than your phd...',
+    ]
+    import random as _random
+    _random.shuffle(_quips)
+    _quips.insert(0, 'preparing plotting workspace...')   # always start here
+    _qi = {'i': 0}
+
+    def _next_quip():
+        _qi['i'] = (_qi['i'] + 1) % len(_quips)
+        status.setText(_quips[_qi['i']])
+
+    _quip_timer = QTimer(splash)
+    _quip_timer.timeout.connect(_next_quip)
+    _quip_timer.start(1700)
+    splash._quip_timer = _quip_timer   # keep a reference so it isn't GC'd
 
     progress = QProgressBar()
     progress.setObjectName('loadingProgress')
     progress.setRange(0, 0)
     progress.setTextVisible(False)
+
+    byline = QLabel()
+    byline.setObjectName('loadingBy')
+    byline.setTextFormat(Qt.TextFormat.RichText)
+    byline.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    byline.setText(
+        f'<span style="font-family:{ff};font-size:{s(14)}px;font-weight:500;'
+        f'color:#8A8A8A;">by Arnold Wijoyo</span>'
+    )
 
     layout.addStretch(1)
     layout.addWidget(title)
@@ -2905,6 +3805,7 @@ def create_loading_screen() -> QSplashScreen:
     layout.addWidget(progress)
     layout.addWidget(status)
     layout.addStretch(1)
+    layout.addWidget(byline)
 
     return splash
 
@@ -2915,7 +3816,7 @@ class LogPanel(QWidget):
         super().__init__(parent)
         self.setObjectName("logPanel")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setContentsMargins(s(4), s(4), s(4), s(4))
         lay.setSpacing(0)
         self.view = QPlainTextEdit()
         self.view.setObjectName("logView")
@@ -2934,12 +3835,14 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('SPECTRAplot')
-        self.resize(1520, 900)
-        self.setMinimumSize(1100, 640)
+        self.resize(s(1520), s(900))
+        self.setMinimumSize(s(1100), s(640))
 
         self._current_mode = MODES[0]['key']
 
         self.controls = ControlPanel()
+        # Strip the on-canvas selection highlight before any export.
+        self.controls.before_save = lambda: self.editor.clear_selection()
         self._figure_states: list[FigureState] = []
         self._active_fig_idx: int = 0
         self.figure_tab_bar = FigureTabBar()
@@ -2952,10 +3855,22 @@ class MainWindow(QMainWindow):
         root_lay.setContentsMargins(0, 0, 0, 0)
         root_lay.setSpacing(0)
         self.header = TopHeader()
+        self.header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.header.mode_changed.connect(self._on_mode_change)
         self.header.theme_toggled.connect(self._on_theme_toggle)
         self.header.plot_requested.connect(self._do_plot)
-        root_lay.addWidget(self.header)
+        # The header spans the full window width above the docks (a top toolbar
+        # sits above the left/right dock areas while keeping the menu bar).
+        self.header_bar = QToolBar('Header', self)
+        self.header_bar.setObjectName('headerBar')
+        self.header_bar.setMovable(False)
+        self.header_bar.setFloatable(False)
+        self.header_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
+        self.header_bar.setStyleSheet(
+            'QToolBar#headerBar { border: none; padding: 0px; margin: 0px; spacing: 0px; }')
+        self.header_bar.addWidget(self.header)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.header_bar)
+
         root_lay.addWidget(self.figure_tab_bar)
         root_lay.addWidget(self.canvas_stack, 1)
         self.setCentralWidget(self.app_root)
@@ -2975,14 +3890,14 @@ class MainWindow(QMainWindow):
         style_host = QWidget()
         style_host.setObjectName("plotStyleHost")
         style_lay = QVBoxLayout(style_host)
-        style_lay.setContentsMargins(8, 8, 8, 8)
-        style_lay.setSpacing(8)
+        style_lay.setContentsMargins(s(8), s(8), s(8), s(8))
+        style_lay.setSpacing(s(8))
 
         # ── Preset buttons at the top of the style dock ──────────────────────
         preset_row = QWidget()
         preset_lay = QHBoxLayout(preset_row)
         preset_lay.setContentsMargins(0, 0, 0, 0)
-        preset_lay.setSpacing(6)
+        preset_lay.setSpacing(s(6))
         btn_save_preset = QPushButton('Save Preset')
         btn_save_preset.setObjectName('presetBtn')
         btn_load_preset = QPushButton('Load Preset')
@@ -3007,17 +3922,13 @@ class MainWindow(QMainWindow):
         self.dock_style = QDockWidget("Plot Style", self)
         self.dock_style.setObjectName("dock_style")
         self.dock_style.setWidget(style_scroll)
-        self.dock_style.setMinimumWidth(360)
+        self.dock_style.setMinimumWidth(s(360))
         self.dock_style.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_style)
 
-        # ── Log dock: bottom area ───────────────────────────────────────────
-        self.log_dock = LogPanel()
-        self.dock_log = QDockWidget("Log", self)
-        self.dock_log.setObjectName("dock_log")
-        self.dock_log.setWidget(self.log_dock)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.dock_log)
+        # (Log panel removed — status messages still go to the status bar.)
+        self.log_dock = None
 
         # Left dock owns left corners; right dock owns right corners (full height)
         self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
@@ -3028,13 +3939,13 @@ class MainWindow(QMainWindow):
         # View-menu dock toggles (inserted before the Dark Mode action)
         self.m_view.insertAction(self.act_dark, self.dock_build.toggleViewAction())
         self.m_view.insertAction(self.act_dark, self.dock_style.toggleViewAction())
-        self.m_view.insertAction(self.act_dark, self.dock_log.toggleViewAction())
         self.m_view.insertSeparator(self.act_dark)
 
         self._default_state = self.saveState()
         QTimer.singleShot(0, self._apply_dock_sizes)
 
         self._has_plotted = False
+        self._suppress_replot = False
         self._plot_called_for_test = False
         self.controls.plot_requested.connect(self._do_plot)
         self.controls.live_update_requested.connect(self._auto_replot)
@@ -3066,6 +3977,8 @@ class MainWindow(QMainWindow):
     def _add_figure_state(self, mode: str = 'pl') -> int:
         c = PlotCanvas()
         e = FigureEditor(c)
+        e.controls = self.controls
+        e.request_replot = lambda: self._auto_replot()
         n = len(self._figure_states) + 1
         state = FigureState(canvas=c, editor=e, mode=mode, label=f'Fig {n}')
         self._figure_states.append(state)
@@ -3078,14 +3991,26 @@ class MainWindow(QMainWindow):
     def _switch_figure(self, idx: int):
         if idx < 0 or idx >= len(self._figure_states):
             return
+        # Save the outgoing figure's data before swapping the shared data box.
+        if 0 <= self._active_fig_idx < len(self._figure_states):
+            self._figure_states[self._active_fig_idx].data = self.controls.capture_data()
         self._active_fig_idx = idx
         state = self._figure_states[idx]
         self.canvas_stack.setCurrentIndex(idx)
         self.figure_tab_bar.set_active(idx)
         self.controls._canvas = state.canvas
         self._on_mode_change(state.mode)
+        # Restore this figure's data. The canvas already holds its last render,
+        # so suppress live-replots while the data box is repopulated.
+        self._suppress_replot = True
+        try:
+            self.controls.restore_data(state.data)
+        finally:
+            self._suppress_replot = False
 
     def _on_add_figure(self):
+        # A new figure carries no data; _switch_figure restores its empty state
+        # while preserving the previous figure's traces.
         idx = self._add_figure_state(mode=self._current_mode)
         self._switch_figure(idx)
 
@@ -3096,12 +4021,14 @@ class MainWindow(QMainWindow):
         self.canvas_stack.removeWidget(state.canvas)
         state.canvas.deleteLater()
         self.figure_tab_bar.remove_figure(idx)
+        # The closed figure's data is discarded with it — mark "no active figure"
+        # so the upcoming switch doesn't capture it back into a surviving tab.
+        self._active_fig_idx = -1
         self._switch_figure(min(idx, len(self._figure_states) - 1))
 
     def _apply_dock_sizes(self):
-        self.resizeDocks([self.dock_build], [260], Qt.Orientation.Horizontal)
-        self.resizeDocks([self.dock_style], [360], Qt.Orientation.Horizontal)
-        self.resizeDocks([self.dock_log], [90], Qt.Orientation.Vertical)
+        self.resizeDocks([self.dock_build], [s(260)], Qt.Orientation.Horizontal)
+        self.resizeDocks([self.dock_style], [s(360)], Qt.Orientation.Horizontal)
 
     def _build_chrome(self):
         self.act_plot = QAction("Plot", self)
@@ -3122,9 +4049,9 @@ class MainWindow(QMainWindow):
         self.act_grid.setCheckable(True)
         self.act_grid.toggled.connect(lambda checked: self.canvas._toolbar_grid(checked))
         self.act_zoom_in = QAction("Zoom In", self)
-        self.act_zoom_in.triggered.connect(lambda: self.canvas._zoom_by(1.25))
+        self.act_zoom_in.triggered.connect(lambda: self.canvas.set_view_scale(self.canvas._view_scale * 1.25))
         self.act_zoom_out = QAction("Zoom Out", self)
-        self.act_zoom_out.triggered.connect(lambda: self.canvas._zoom_by(1 / 1.25))
+        self.act_zoom_out.triggered.connect(lambda: self.canvas.set_view_scale(self.canvas._view_scale / 1.25))
 
         self.act_dark = QAction("Dark Mode", self)
         self.act_dark.setCheckable(True)
@@ -3201,7 +4128,7 @@ class MainWindow(QMainWindow):
         self._sb_ready.setText("● Ready" if ok else "● Busy")
 
     def _apply_accent(self, accent: str):
-        QApplication.instance().setStyleSheet(build_style(accent, _APP_DARK))
+        QApplication.instance().setStyleSheet(build_style(accent, _APP_DARK, spectra_theme.UI_SCALE))
         if getattr(self, "header", None) is not None:
             self.header.apply_theme(_APP_DARK)
 
@@ -3231,7 +4158,7 @@ class MainWindow(QMainWindow):
                 self.header.btn_theme.blockSignals(False)
             self.header.apply_theme(dark)
         accent = MODE_BY_KEY[self._current_mode]['accent']
-        QApplication.instance().setStyleSheet(build_style(accent, dark))
+        QApplication.instance().setStyleSheet(build_style(accent, dark, spectra_theme.UI_SCALE))
 
     def _on_coord_motion(self, event):
         if event.inaxes is None:
@@ -3278,6 +4205,8 @@ class MainWindow(QMainWindow):
     def _auto_replot(self):
         """Live-refresh the figure after a trace/legend change — but only once a
         plot already exists, and without popping the 'No Data' / error dialogs."""
+        if self._suppress_replot:
+            return
         if self._has_plotted:
             self._do_plot(silent=True)
 
@@ -3322,30 +4251,66 @@ class MainWindow(QMainWindow):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def _load_bundled_fonts():
-    """Load Montserrat (and any other bundled fonts) from assets/ if present."""
-    assets = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
-    for fname in ('Montserrat-ExtraBold.ttf', 'Montserrat-Light.ttf',
-                  'Montserrat-Bold.ttf', 'Montserrat-Regular.ttf'):
-        path = os.path.join(assets, fname)
+def _load_bundled_fonts() -> str:
+    """Load the bundled Montserrat variable font and return its family name, or
+    '' if unavailable. The file is renamed to the unique family 'Montserrat App'
+    so Qt always uses our copy instead of (or colliding with) a system install.
+    The single variable file supplies every weight (Light 300 … ExtraBold 800)."""
+    path = resource_path('assets', 'Montserrat-App.ttf')
+    if os.path.isfile(path):
+        fid = QFontDatabase.addApplicationFont(path)
+        fams = QFontDatabase.applicationFontFamilies(fid)
+        if fams:
+            return fams[0]
+    return ''
+
+
+def _load_ui_font() -> str:
+    """Register the bundled Google Sans font (project root) and return its
+    family name, or '' if unavailable."""
+    family = ''
+    for fname in ('GoogleSans-VariableFont_GRAD,opsz,wght.ttf',
+                  'GoogleSans-Italic-VariableFont_GRAD,opsz,wght.ttf'):
+        path = resource_path(fname)
         if os.path.isfile(path):
-            QFontDatabase.addApplicationFont(path)
+            fid = QFontDatabase.addApplicationFont(path)
+            fams = QFontDatabase.applicationFontFamilies(fid)
+            if fams and not family:
+                family = fams[0]
+    return family
 
 
 def main():
     if sys.platform == 'darwin':
         os.environ.setdefault('QT_MAC_WANTS_LAYER', '1')
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    _load_bundled_fonts()
-    app.setStyleSheet(build_style(MODES[0]['accent']))
-    app.setFont(QFont('Segoe UI', 9))
+    init_ui_scale(app)
+    mont_font = _load_bundled_fonts()
+    ui_font = _load_ui_font()
+    chosen_font = mont_font or ui_font   # Montserrat is the primary UI font
+    if chosen_font:
+        set_ui_font(chosen_font)
+    app.setStyleSheet(build_style(MODES[0]['accent'], False, spectra_theme.UI_SCALE))
+    app.setFont(QFont(chosen_font or 'Segoe UI', s(9)))
     splash = create_loading_screen()
     splash.show()
     app.processEvents()
+    _t0 = time.monotonic()
     win = MainWindow()
-    win.showMaximized()
-    splash.finish(win)
+    # Keep the loading screen up for a fixed 10 s total (minus build time)
+    _elapsed_ms = int((time.monotonic() - _t0) * 1000)
+    _remaining = max(0, 10000 - _elapsed_ms)
+
+    def _reveal():
+        if hasattr(splash, '_quip_timer'):
+            splash._quip_timer.stop()
+        win.showMaximized()
+        splash.finish(win)
+
+    QTimer.singleShot(_remaining, _reveal)
     sys.exit(app.exec())
 
 

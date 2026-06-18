@@ -6,6 +6,7 @@ the application logic.  spectra_app re-exports every name defined here so
 all existing call-sites continue to resolve without modification.
 """
 
+import re
 import sys
 from functools import lru_cache
 
@@ -29,6 +30,57 @@ def darken(hex_color: str, factor: float = 0.45) -> str:
     return to_hex((r, g, b))
 
 
+# ── UI scaling ──────────────────────────────────────────────────────────────────
+# Every chrome dimension in the app was tuned on a 1440p (2560×1440) display.
+# init_ui_scale() derives one global factor from the actual screen so the
+# interface keeps the same screen proportion it had on the design target, and
+# s() / build_style(scale=) apply it to Python dimensions and the QSS.
+UI_SCALE = 1.0  # set at startup by init_ui_scale()
+
+# Extra zoom applied on top of the auto-detected screen proportion. Bump this
+# to make the whole interface larger/smaller without touching anything else.
+UI_BOOST = 1.25
+
+# Flat px added to every QSS font-size (before UI_SCALE), so text reads larger
+# without enlarging layout dimensions. Raise/lower to taste.
+UI_FONT_BOOST = 2
+
+
+def init_ui_scale(app, base=(2560, 1440)) -> float:
+    """Derive a global UI scale from the primary screen vs the 1440p design
+    target, so chrome keeps the same screen proportion it had on 1440p, then
+    apply UI_BOOST as an overall zoom."""
+    global UI_SCALE
+    try:
+        geo = app.primaryScreen().geometry()
+        proportion = min(geo.width() / base[0], geo.height() / base[1])
+        UI_SCALE = max(0.7, min(2.5, proportion * UI_BOOST))
+    except Exception:
+        UI_SCALE = UI_BOOST
+    return UI_SCALE
+
+
+# ── UI font ───────────────────────────────────────────────────────────────────
+# The application font stack. set_ui_font() prepends a freshly loaded family
+# (e.g. bundled Google Sans) so build_style() and chrome text pick it up.
+_FONT_FALLBACK = ("'Segoe UI Variable', 'Segoe UI', 'IBM Plex Sans', 'Inter', "
+                  "system-ui, sans-serif")
+UI_FONT_FAMILY = _FONT_FALLBACK
+
+
+def set_ui_font(family: str):
+    """Make `family` the primary UI font, keeping the existing stack as fallback.
+    Call before the first build_style() so the stylesheet cache picks it up."""
+    global UI_FONT_FAMILY
+    if family:
+        UI_FONT_FAMILY = f"'{family}', {_FONT_FALLBACK}"
+
+
+def s(px):
+    """Scale a 1440p-tuned pixel length by the active UI scale."""
+    return round(px * UI_SCALE)
+
+
 # ── Plot modes ──────────────────────────────────────────────────────────────────
 # Each mode carries a signature trace accent for plot defaults. The application
 # chrome stays monochrome so data color does not compete with the interface.
@@ -44,8 +96,8 @@ MODE_BY_KEY = {m['key']: m for m in MODES}
 
 
 # ── Stylesheet ────────────────────────────────────────────────────────────────
-@lru_cache(maxsize=16)
-def build_style(_accent: str, dark: bool = False) -> str:
+@lru_cache(maxsize=32)
+def build_style(_accent: str, dark: bool = False, scale: float = 1.0) -> str:
     if dark:
         BG       = '#1E1E1E'
         SURF     = '#252526'
@@ -82,10 +134,16 @@ def build_style(_accent: str, dark: bool = False) -> str:
     # Contrast-safe accent for text on white (or on dark bg in dark mode)
     ACCENT_TEXT = ACCENT if dark else darken(ACCENT, 0.52)
     ON_PRIMARY = '#171717' if dark else '#FFFFFF'
-    return f"""
+    try:
+        _fr, _fg, _fb = [round(c * 255) for c in to_rgb(ACCENT)]
+        ACCENT_FILL = f'rgba({_fr},{_fg},{_fb},0.12)'  # faint accent for tab hover
+    except Exception:
+        ACCENT_FILL = SURF
+    FONT = UI_FONT_FAMILY
+    qss = f"""
 /* ── Global reset ───────────────────────────────────────────────────────── */
 * {{
-    font-family: 'Segoe UI Variable', 'Segoe UI', 'IBM Plex Sans', 'Inter', system-ui, sans-serif;
+    font-family: {FONT};
     font-size: 12px;
     color: {INK};
 }}
@@ -194,7 +252,7 @@ QPushButton#colorpick {{
 }}
 #appRoot {{ background: {BG}; }}
 QLabel#appTitle {{ color: {INK}; padding: 0 2px; }}
-QLabel#brandSub {{ color: {MUTED}; font-size: 12px; font-weight: 500; padding: 0 3px; }}
+QLabel#brandSub {{ color: {MUTED}; font-size: 12px; font-weight: 400; padding: 0 3px; }}
 
 /* ── Loading screen ─────────────────────────────────────────────────────── */
 #loadingScreen {{
@@ -231,13 +289,13 @@ QPushButton#headerTab {{
 }}
 QPushButton#headerTab:hover {{
     color: {INK};
-    background: {SURF};
-    border-color: {PRIMARY};
+    background: {ACCENT_FILL};
+    border-color: {ACCENT};
 }}
 QPushButton#headerTab:checked {{
-    color: {ON_PRIMARY};
-    background: {PRIMARY};
-    border: 1px solid {PRIMARY};
+    color: {ON_ACCENT};
+    background: {ACCENT};
+    border: 1px solid {ACCENT};
     font-weight: 700;
 }}
 
@@ -615,6 +673,17 @@ QPushButton#figureAddBtn:hover {{
     border-style: solid;
 }}
 """
+    # Bump every font-size by a flat amount (layout dimensions untouched) so UI
+    # text reads a little larger without changing the overall UI scale.
+    if UI_FONT_BOOST:
+        qss = re.sub(
+            r'(font-size:\s*)(\d+(?:\.\d+)?)px',
+            lambda m: f'{m.group(1)}{round(float(m.group(2)) + UI_FONT_BOOST, 2)}px',
+            qss)
+    if scale != 1.0:
+        qss = re.sub(r'(\d+(?:\.\d+)?)px',
+                     lambda m: f'{round(float(m.group(1)) * scale, 2)}px', qss)
+    return qss
 
 
 # ── Shadow helper ─────────────────────────────────────────────────────────────
