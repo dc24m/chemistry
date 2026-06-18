@@ -55,7 +55,7 @@ except ModuleNotFoundError as exc:
 
 import spectra_theme
 from spectra_theme import (
-    MODES, MODE_BY_KEY, darken, add_shadow, build_style, s, init_ui_scale,
+    MODES, MODE_BY_KEY, darken, add_shadow, build_style, s, vs, init_ui_scale,
     set_ui_font,
 )
 
@@ -520,7 +520,6 @@ class TopHeader(QWidget):
     mode_changed = pyqtSignal(str)
     theme_toggled = pyqtSignal(bool)
     plot_requested = pyqtSignal()
-    scale_changed = pyqtSignal(float)
 
     # Fallback font stack if Montserrat is unavailable
     _TITLE_FF = "'Segoe UI Variable','Segoe UI','IBM Plex Sans','Inter',sans-serif"
@@ -597,76 +596,6 @@ class TopHeader(QWidget):
         self.btn_theme.setFixedSize(s(62), s(36))
         self.btn_theme.toggled.connect(self.theme_toggled)
         lay.addWidget(self.btn_theme)
-        lay.addSpacing(s(6))
-
-        self.btn_settings = QPushButton('⚙')
-        self.btn_settings.setObjectName('settingsBtn')
-        self.btn_settings.setFixedSize(s(36), s(36))
-        self.btn_settings.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_settings.setToolTip('Settings')
-        self.btn_settings.clicked.connect(self._open_settings_dialog)
-        lay.addWidget(self.btn_settings)
-
-        self._settings_dialog = None  # created lazily
-
-    def _open_settings_dialog(self):
-        if self._settings_dialog is None:
-            dlg = QDialog(self.window())
-            dlg.setWindowTitle('Settings')
-            dlg.setMinimumWidth(s(300))
-            dlg.setWindowFlags(
-                Qt.WindowType.Dialog |
-                Qt.WindowType.WindowCloseButtonHint
-            )
-            lay = QVBoxLayout(dlg)
-            lay.setContentsMargins(s(20), s(20), s(20), s(20))
-            lay.setSpacing(s(14))
-
-            title = QLabel('Display Settings')
-            title.setObjectName('settingsTitle')
-            lay.addWidget(title)
-
-            sep = QFrame()
-            sep.setFrameShape(QFrame.Shape.HLine)
-            sep.setObjectName('settingsSep')
-            lay.addWidget(sep)
-
-            scale_row = QHBoxLayout()
-            scale_row.addWidget(QLabel('UI Scale'))
-            scale_row.addStretch()
-            self._scale_lbl = QLabel()
-            self._scale_lbl.setObjectName('scaleLbl')
-            scale_row.addWidget(self._scale_lbl)
-            lay.addLayout(scale_row)
-
-            self._scale_slider = QSlider(Qt.Orientation.Horizontal)
-            self._scale_slider.setRange(50, 200)
-            self._scale_slider.valueChanged.connect(self._on_scale_slider)
-            lay.addWidget(self._scale_slider)
-
-            hint = QLabel('Drag to adjust text and spacing size.')
-            hint.setObjectName('settingsHint')
-            hint.setWordWrap(True)
-            lay.addWidget(hint)
-
-            self._set_slider_from_scale(spectra_theme.UI_SCALE)
-            self._settings_dialog = dlg
-
-        self._settings_dialog.show()
-        self._settings_dialog.raise_()
-        self._settings_dialog.activateWindow()
-
-    def _set_slider_from_scale(self, scale: float):
-        val = round(scale * 100)
-        self._scale_slider.blockSignals(True)
-        self._scale_slider.setValue(val)
-        self._scale_slider.blockSignals(False)
-        self._scale_lbl.setText(f'{scale:.2f}×')
-
-    def _on_scale_slider(self, value: int):
-        scale = value / 100.0
-        self._scale_lbl.setText(f'{scale:.2f}×')
-        self.scale_changed.emit(scale)
 
     def _set_title_colors(self, ink: str, muted: str):
         ff = spectra_theme.UI_FONT_FAMILY
@@ -1222,15 +1151,15 @@ class ControlPanel(QScrollArea):
         self.setWidget(root)
 
         lay = QVBoxLayout(root)
-        lay.setContentsMargins(s(8), s(8), s(8), s(12))
-        lay.setSpacing(s(6))
+        lay.setContentsMargins(s(8), vs(8), s(8), vs(12))
+        lay.setSpacing(vs(6))
 
         self._current_mode = MODES[0]['key']
 
         # ── Plot panels
         self.g_plot = QGroupBox('Plot')
         gl = QVBoxLayout(self.g_plot)
-        gl.setSpacing(s(9))
+        gl.setSpacing(vs(9))
         self.spin_panels = FlatSpinBox()
         self.spin_panels.setRange(1, 5)
         self.spin_panels.setValue(1)
@@ -1248,8 +1177,8 @@ class ControlPanel(QScrollArea):
         # ── Data tabs
         self.g_data = QGroupBox('Data')
         dgl = QVBoxLayout(self.g_data)
-        dgl.setContentsMargins(s(8), s(16), s(8), s(8))
-        dgl.setSpacing(s(6))
+        dgl.setContentsMargins(s(8), vs(16), s(8), vs(8))
+        dgl.setSpacing(vs(6))
         hint = QLabel('Add .csv / .tsv / .xy files per panel.')
         hint.setObjectName('hint')
         hint.setWordWrap(True)
@@ -1268,8 +1197,8 @@ class ControlPanel(QScrollArea):
 
         self.g_iv = QGroupBox('IV Curve Data')
         iv_lay = QVBoxLayout(self.g_iv)
-        iv_lay.setContentsMargins(s(4), s(14), s(4), s(8))
-        iv_lay.setSpacing(s(8))
+        iv_lay.setContentsMargins(s(4), vs(14), s(4), vs(8))
+        iv_lay.setSpacing(vs(8))
         self.spin_iv_sets = FlatSpinBox()
         self.spin_iv_sets.setRange(1, 10)
         self.spin_iv_sets.setValue(3)
@@ -1294,7 +1223,7 @@ class ControlPanel(QScrollArea):
         # ── Axes
         self.g_axes = QGroupBox('Axes')
         agl = QVBoxLayout(self.g_axes)
-        agl.setSpacing(s(9))
+        agl.setSpacing(vs(9))
 
         xrow = QHBoxLayout(); xrow.setSpacing(s(5))
         xl = QLabel('X range'); xl.setFixedWidth(s(66)); xl.setObjectName('fieldlbl')
@@ -1382,7 +1311,7 @@ class ControlPanel(QScrollArea):
         # ── Labels
         g4 = QGroupBox('Labels')
         lgl = QVBoxLayout(g4)
-        lgl.setSpacing(s(7))
+        lgl.setSpacing(vs(7))
         self.chk_main_title = QCheckBox('Main title')
         self.edit_main_title = QLineEdit()
         self.edit_main_title.setPlaceholderText('Enter main title…')
@@ -1407,7 +1336,7 @@ class ControlPanel(QScrollArea):
         # ── Style
         g5 = QGroupBox('Style')
         sgl = QVBoxLayout(g5)
-        sgl.setSpacing(s(9))
+        sgl.setSpacing(vs(9))
 
         self.spin_lw = FlatDoubleSpinBox()
         self.spin_lw.setRange(0.5, 6.0); self.spin_lw.setSingleStep(0.5); self.spin_lw.setValue(1.5)
@@ -1441,7 +1370,7 @@ class ControlPanel(QScrollArea):
         # ── Graph Appearance (figure font family)
         g_app = QGroupBox('Graph Appearance')
         appl = QVBoxLayout(g_app)
-        appl.setSpacing(s(4))
+        appl.setSpacing(vs(4))
         self.combo_font = NoScrollComboBox()
         self.combo_font.addItems([
             'Arial', 'Helvetica', 'Times New Roman',
@@ -1464,8 +1393,8 @@ class ControlPanel(QScrollArea):
         # ── Ticks (MATLAB-style boxed axes by default)
         g_tick = QGroupBox('Ticks')
         tgl = QVBoxLayout(g_tick)
-        tgl.setSpacing(s(4))
-        tgl.setContentsMargins(s(8), s(6), s(8), s(6))
+        tgl.setSpacing(vs(4))
+        tgl.setContentsMargins(s(8), vs(6), s(8), vs(6))
         self.combo_tick_dir = QComboBox()
         self.combo_tick_dir.addItems(['in', 'out', 'inout'])
         self.combo_tick_dir.setCurrentText('in')
@@ -1491,8 +1420,8 @@ class ControlPanel(QScrollArea):
         # ── Number format (axis notation)
         g_num = QGroupBox('Axis Numbers')
         ngl = QVBoxLayout(g_num)
-        ngl.setSpacing(s(4))
-        ngl.setContentsMargins(s(8), s(6), s(8), s(6))
+        ngl.setSpacing(vs(4))
+        ngl.setContentsMargins(s(8), vs(6), s(8), vs(6))
         self.combo_ynot = QComboBox()
         self.combo_ynot.addItems(['Normal', 'Scientific notation', 'Engineering/K'])
         self.combo_ynot.currentTextChanged.connect(self._toggle_sci)
@@ -1530,8 +1459,8 @@ class ControlPanel(QScrollArea):
         # ── Legend (full customization; transparent background by default)
         g_legend = QGroupBox('Legend')
         lgll = QFormLayout(g_legend)
-        lgll.setVerticalSpacing(s(4))
-        lgll.setContentsMargins(s(8), s(6), s(8), s(6))
+        lgll.setVerticalSpacing(vs(4))
+        lgll.setContentsMargins(s(8), vs(6), s(8), vs(6))
         lgll.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.chk_legend = QCheckBox('Show legend')
         self.chk_legend.setChecked(True)
@@ -1596,8 +1525,8 @@ class ControlPanel(QScrollArea):
         # ── Plot Box (axis box, tick-label padding, manual geometry, snap)
         g_box = QGroupBox('Plot Box')
         bgl = QFormLayout(g_box)
-        bgl.setVerticalSpacing(s(4))
-        bgl.setContentsMargins(s(8), s(6), s(8), s(6))
+        bgl.setVerticalSpacing(vs(4))
+        bgl.setContentsMargins(s(8), vs(6), s(8), vs(6))
         bgl.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.spin_box_lw = FlatDoubleSpinBox()
         self.spin_box_lw.setRange(0.2, 6.0); self.spin_box_lw.setSingleStep(0.1)
@@ -1642,7 +1571,7 @@ class ControlPanel(QScrollArea):
         # ── PL options
         self.g_pl = QGroupBox('PL Options')
         plgl = QVBoxLayout(self.g_pl)
-        plgl.setSpacing(s(9))
+        plgl.setSpacing(vs(9))
         self.chk_pl_baseline = QCheckBox('Baseline subtract')
         self.chk_pl_baseline.setChecked(True)
         pl_note = QLabel('Matches the original PL MATLAB workflow: y = y - y(1).')
@@ -1655,7 +1584,7 @@ class ControlPanel(QScrollArea):
         # ── XRD options
         self.g_xrd = QGroupBox('XRD Options')
         xgl = QVBoxLayout(self.g_xrd)
-        xgl.setSpacing(s(9))
+        xgl.setSpacing(vs(9))
         self.chk_d = QCheckBox('Convert 2θ → d-spacing (Å)')
         xgl.addWidget(self.chk_d)
         self.spin_lam = FlatDoubleSpinBox()
@@ -1679,7 +1608,7 @@ class ControlPanel(QScrollArea):
         xgl.addLayout(_labeled('Label gap', self.spin_xrd_label_gap))
 
         xgl.addWidget(_sep())
-        ref_lbl = QLabel('Reference traces (double-click on plot to recolour):')
+        ref_lbl = QLabel('Reference traces:')
         ref_lbl.setObjectName('fieldlbl')
         xgl.addWidget(ref_lbl)
         self.xrd_ref_list = QListWidget()
@@ -1707,7 +1636,7 @@ class ControlPanel(QScrollArea):
         # ── Export
         g6 = QGroupBox('Export')
         egl = QVBoxLayout(g6)
-        egl.setSpacing(s(9))
+        egl.setSpacing(vs(9))
         self.spin_dpi = FlatSpinBox()
         self.spin_dpi.setRange(72, 600); self.spin_dpi.setSingleStep(50); self.spin_dpi.setValue(300)
         egl.addLayout(_labeled('DPI', self.spin_dpi))
@@ -3003,7 +2932,7 @@ class PlotCanvas(QWidget):
         super().__init__(parent)
         self.setObjectName('canvasArea')
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(s(14), s(14), s(14), s(8))
+        lay.setContentsMargins(s(14), vs(14), s(14), vs(8))
         lay.setSpacing(0)
 
         self.card = QWidget()
@@ -3011,8 +2940,8 @@ class PlotCanvas(QWidget):
         self.card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         add_shadow(self.card, blur=32, y=10, alpha=28)
         card_lay = QVBoxLayout(self.card)
-        card_lay.setContentsMargins(s(10), s(10), s(10), s(10))
-        card_lay.setSpacing(s(10))
+        card_lay.setContentsMargins(s(10), vs(10), s(10), vs(10))
+        card_lay.setSpacing(vs(10))
 
         self.fig = Figure(facecolor='white', dpi=self.DISPLAY_DPI)
         self.canvas = FigureCanvasQTAgg(self.fig)
@@ -3193,16 +3122,32 @@ def _apply_font(s: dict):
         matplotlib.rcParams['font.family'] = [fam, 'Arial', 'DejaVu Sans']
     except Exception:
         matplotlib.rcParams['font.family'] = 'Arial'
+    # Render mathtext (sub/superscripts via $..$) in the same figure font, upright,
+    # instead of matplotlib's default math font — so subscripts match the rest.
+    try:
+        matplotlib.rcParams['mathtext.default'] = 'regular'
+        matplotlib.rcParams['mathtext.fontset'] = 'custom'
+        matplotlib.rcParams['mathtext.rm'] = fam
+        matplotlib.rcParams['mathtext.it'] = f'{fam}:italic'
+        matplotlib.rcParams['mathtext.bf'] = f'{fam}:bold'
+    except Exception:
+        pass
+
+
+_MATH_RUN = re.compile(r'(?:[_^]\{[^}]*\})+')
 
 
 def _mathify(text: str) -> str:
-    """Wrap only _{} / ^{} tokens in $...$ so the rest of the label stays in the normal font."""
-    if not text or ('_{' not in text and '^{' not in text):
+    """Render TeX sub/superscripts (_{...} / ^{...}) by wrapping ONLY those tokens
+    in $...$ — the surrounding text keeps its real font and spacing (the H$_2$O idiom)."""
+    if not text:
         return text
-    if '$' in text:
-        return text  # user is handling math notation manually
-    import re as _re
-    return _re.sub(r'([_^]\{[^}]*\})', r'$\1$', text)
+    stripped = text.strip()
+    if stripped.startswith('$') and stripped.endswith('$') and stripped.count('$') == 2:
+        return text
+    if '_{' not in text and '^{' not in text:
+        return text
+    return _MATH_RUN.sub(lambda m: f'${m.group(0)}$', text)
 
 
 def _apply_y_notation(ax, s: dict):
@@ -3757,7 +3702,7 @@ def do_plot(fig: Figure, s: dict) -> str:
 # ── Main window ───────────────────────────────────────────────────────────────
 
 def create_loading_screen() -> QSplashScreen:
-    pixmap = QPixmap(s(900), s(880))
+    pixmap = QPixmap(s(760), s(740))
     pixmap.fill(QColor('#FFFFFF'))
 
     splash = QSplashScreen(pixmap)
@@ -3778,7 +3723,7 @@ def create_loading_screen() -> QSplashScreen:
         # Render at the screen's native pixel density so it stays crisp on Retina
         scr = QApplication.primaryScreen()
         dpr = scr.devicePixelRatio() if scr else 1.0
-        target_w = s(918)
+        target_w = s(680)
         pix = QPixmap(img_path).scaledToWidth(
             int(target_w * dpr), Qt.TransformationMode.SmoothTransformation)
         pix.setDevicePixelRatio(dpr)
@@ -3930,7 +3875,6 @@ class MainWindow(QMainWindow):
         self.header.mode_changed.connect(self._on_mode_change)
         self.header.theme_toggled.connect(self._on_theme_toggle)
         self.header.plot_requested.connect(self._do_plot)
-        self.header.scale_changed.connect(self._on_scale_change)
         # The header spans the full window width above the docks (a top toolbar
         # sits above the left/right dock areas while keeping the menu bar).
         self.header_bar = QToolBar('Header', self)
@@ -4215,11 +4159,6 @@ class MainWindow(QMainWindow):
             action.setChecked(True)
         self._apply_accent(MODE_BY_KEY[key]['accent'])
         self.controls.set_mode(key)
-
-    def _on_scale_change(self, scale: float):
-        spectra_theme.UI_SCALE = scale
-        accent = MODE_BY_KEY[self._current_mode]['accent']
-        QApplication.instance().setStyleSheet(build_style(accent, _APP_DARK, scale))
 
     def _on_theme_toggle(self, dark: bool):
         global _APP_DARK

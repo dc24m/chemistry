@@ -77,13 +77,13 @@ One-click toggle in the header switches the entire UI and the canvas background 
 
 ## Screenshots
 
-| IV mode | PL options |
-|---------|------------|
-| ![IV mode](spectraplot_iv_mode_qa.png) | ![PL options](spectraplot_pl_options_qa.png) |
+| Photoluminescence | Absorbance |
+|-------------------|------------|
+| ![SPECTRAplot Photoluminescence mode](assets/screenshots/spectraplot-pl.png) | ![SPECTRAplot Absorbance mode](assets/screenshots/spectraplot-absorbance.png) |
 
-| XRD margin labels | XRD options |
-|-------------------|-------------|
-| ![XRD margin plot](spectraplot_xrd_margin_plot_qa.png) | ![XRD options](spectraplot_xrd_options_scrolled_qa.png) |
+| XRD | IV curve |
+|-----|----------|
+| ![SPECTRAplot XRD mode](assets/screenshots/spectraplot-xrd.png) | ![SPECTRAplot IV curve mode](assets/screenshots/spectraplot-iv.png) |
 
 ---
 
@@ -127,6 +127,8 @@ spectra_theme.py        — palette, stylesheet, and shadow helpers
 requirements_spectra.txt
 assets/
   logo.png              — header logo (optional; app starts without it)
+  loading.png           — loading screen artwork
+  screenshots/          — README screenshots generated from the current UI
 tests/
   test_loading_screen.py
   test_spectra_aux_docks.py
@@ -142,8 +144,7 @@ tests/
 ## Running tests
 
 ```bash
-pip install pytest
-pytest tests/
+python -m unittest discover -s tests
 ```
 
 The test suite covers UI layout, window chrome, plotting behavior, the theme module, auxiliary docks, the loading screen, and static regressions.

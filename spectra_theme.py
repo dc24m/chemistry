@@ -81,6 +81,11 @@ def s(px):
     return round(px * UI_SCALE)
 
 
+def vs(px):
+    """Vertical spacing — s() with an extra 1.25× vertical boost."""
+    return round(px * UI_SCALE * 1.25)
+
+
 # ── Plot modes ──────────────────────────────────────────────────────────────────
 # Each mode carries a signature trace accent for plot defaults. The application
 # chrome stays monochrome so data color does not compete with the interface.
@@ -164,18 +169,18 @@ QGroupBox {{
     border: 1px solid {BORDER};
     border-radius: 8px;
     margin-top: 0px;
-    padding: 22px 10px 10px 10px;
+    padding: 28px 10px 13px 10px;
 }}
 QGroupBox::title {{
     subcontrol-origin: padding;
     subcontrol-position: top left;
-    top: 6px;
+    top: 8px;
     left: 12px;
     padding: 0px;
     background: transparent;
-    color: {ACCENT_TEXT};
+    color: {ACCENT};
     font-size: 12px;
-    font-weight: 700;
+    font-weight: 800;
     letter-spacing: 0.3px;
 }}
 
@@ -185,10 +190,10 @@ QPushButton {{
     color: {INK};
     border: 1px solid {BORDER};
     border-radius: 6px;
-    padding: 4px 12px;
+    padding: 5px 12px;
     font-size: 12px;
     font-weight: 500;
-    min-height: 26px;
+    min-height: 33px;
     letter-spacing: 0.1px;
 }}
 QPushButton:hover {{
@@ -283,8 +288,8 @@ QPushButton#headerTab {{
     border-radius: 7px;
     font-size: 12px;
     font-weight: 600;
-    padding: 0px 12px;
-    min-height: 34px;
+    padding: 3px 12px;
+    min-height: 43px;
     letter-spacing: 0px;
 }}
 QPushButton#headerTab:hover {{
@@ -293,7 +298,7 @@ QPushButton#headerTab:hover {{
     border-color: {ACCENT};
 }}
 QPushButton#headerTab:checked {{
-    color: {ON_ACCENT};
+    color: #ffffff;
     background: {ACCENT};
     border: 1px solid {ACCENT};
     font-weight: 700;
@@ -417,7 +422,7 @@ QLabel#dockTitle {{
     font-size: 12px;
     font-weight: 600;
     letter-spacing: 0.8px;
-    padding: 2px 2px 4px 2px;
+    padding: 3px 2px 5px 2px;
 }}
 
 /* ── Figure toolbar ─────────────────────────────────────────────────────── */
