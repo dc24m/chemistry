@@ -23,3 +23,6 @@ Thumbs.db
 .agents/
 .claude/
 superpowers/
+
+# Git worktrees
+.worktrees/
