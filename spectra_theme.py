@@ -54,7 +54,7 @@ def init_ui_scale(app, base=(2560, 1440)) -> float:
     try:
         geo = app.primaryScreen().geometry()
         proportion = min(geo.width() / base[0], geo.height() / base[1])
-        UI_SCALE = max(0.7, min(2.5, proportion * UI_BOOST))
+        UI_SCALE = max(0.75, min(2.5, proportion * UI_BOOST))
     except Exception:
         UI_SCALE = UI_BOOST
     return UI_SCALE
@@ -508,6 +508,59 @@ QPushButton#themeToggle:checked {{
     background: {PRIMARY};
     color: {ON_PRIMARY};
     border-color: {PRIMARY};
+}}
+QPushButton#settingsBtn {{
+    background: {SURF2};
+    color: {MUTED};
+    border: 1px solid {BORDER};
+    border-radius: 7px;
+    font-size: 15px;
+    padding: 0px;
+}}
+QPushButton#settingsBtn:hover {{
+    background: {HOVER};
+    border-color: {PRIMARY};
+    color: {INK};
+}}
+QPushButton#settingsBtn:checked {{
+    background: {HOVER};
+    border-color: {PRIMARY};
+    color: {INK};
+}}
+QLabel#settingsTitle {{
+    font-size: 15px;
+    font-weight: 700;
+    color: {INK};
+}}
+QFrame#settingsSep {{
+    color: {BORDER};
+    background: {BORDER};
+    max-height: 1px;
+}}
+QLabel#settingsHint {{
+    font-size: 11px;
+    color: {MUTED};
+}}
+QLabel#scaleLbl {{
+    font-size: 13px;
+    font-weight: 600;
+    color: {PRIMARY};
+}}
+QSlider::groove:horizontal {{
+    height: 4px;
+    background: {SURF2};
+    border-radius: 2px;
+}}
+QSlider::sub-page:horizontal {{
+    background: {PRIMARY};
+    border-radius: 2px;
+}}
+QSlider::handle:horizontal {{
+    width: 16px;
+    height: 16px;
+    margin: -6px 0;
+    background: {PRIMARY};
+    border-radius: 8px;
 }}
 
 /* ── Bottom status bar ──────────────────────────────────────────────────── */

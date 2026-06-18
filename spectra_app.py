@@ -520,6 +520,7 @@ class TopHeader(QWidget):
     mode_changed = pyqtSignal(str)
     theme_toggled = pyqtSignal(bool)
     plot_requested = pyqtSignal()
+    scale_changed = pyqtSignal(float)
 
     # Fallback font stack if Montserrat is unavailable
     _TITLE_FF = "'Segoe UI Variable','Segoe UI','IBM Plex Sans','Inter',sans-serif"
@@ -596,6 +597,76 @@ class TopHeader(QWidget):
         self.btn_theme.setFixedSize(s(62), s(36))
         self.btn_theme.toggled.connect(self.theme_toggled)
         lay.addWidget(self.btn_theme)
+        lay.addSpacing(s(6))
+
+        self.btn_settings = QPushButton('⚙')
+        self.btn_settings.setObjectName('settingsBtn')
+        self.btn_settings.setFixedSize(s(36), s(36))
+        self.btn_settings.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_settings.setToolTip('Settings')
+        self.btn_settings.clicked.connect(self._open_settings_dialog)
+        lay.addWidget(self.btn_settings)
+
+        self._settings_dialog = None  # created lazily
+
+    def _open_settings_dialog(self):
+        if self._settings_dialog is None:
+            dlg = QDialog(self.window())
+            dlg.setWindowTitle('Settings')
+            dlg.setMinimumWidth(s(300))
+            dlg.setWindowFlags(
+                Qt.WindowType.Dialog |
+                Qt.WindowType.WindowCloseButtonHint
+            )
+            lay = QVBoxLayout(dlg)
+            lay.setContentsMargins(s(20), s(20), s(20), s(20))
+            lay.setSpacing(s(14))
+
+            title = QLabel('Display Settings')
+            title.setObjectName('settingsTitle')
+            lay.addWidget(title)
+
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setObjectName('settingsSep')
+            lay.addWidget(sep)
+
+            scale_row = QHBoxLayout()
+            scale_row.addWidget(QLabel('UI Scale'))
+            scale_row.addStretch()
+            self._scale_lbl = QLabel()
+            self._scale_lbl.setObjectName('scaleLbl')
+            scale_row.addWidget(self._scale_lbl)
+            lay.addLayout(scale_row)
+
+            self._scale_slider = QSlider(Qt.Orientation.Horizontal)
+            self._scale_slider.setRange(50, 200)
+            self._scale_slider.valueChanged.connect(self._on_scale_slider)
+            lay.addWidget(self._scale_slider)
+
+            hint = QLabel('Drag to adjust text and spacing size.')
+            hint.setObjectName('settingsHint')
+            hint.setWordWrap(True)
+            lay.addWidget(hint)
+
+            self._set_slider_from_scale(spectra_theme.UI_SCALE)
+            self._settings_dialog = dlg
+
+        self._settings_dialog.show()
+        self._settings_dialog.raise_()
+        self._settings_dialog.activateWindow()
+
+    def _set_slider_from_scale(self, scale: float):
+        val = round(scale * 100)
+        self._scale_slider.blockSignals(True)
+        self._scale_slider.setValue(val)
+        self._scale_slider.blockSignals(False)
+        self._scale_lbl.setText(f'{scale:.2f}×')
+
+    def _on_scale_slider(self, value: int):
+        scale = value / 100.0
+        self._scale_lbl.setText(f'{scale:.2f}×')
+        self.scale_changed.emit(scale)
 
     def _set_title_colors(self, ink: str, muted: str):
         ff = spectra_theme.UI_FONT_FAMILY
@@ -3125,13 +3196,13 @@ def _apply_font(s: dict):
 
 
 def _mathify(text: str) -> str:
-    """Wrap label in $...$ if it contains TeX sub/superscript notation (_{} or ^{})."""
+    """Wrap only _{} / ^{} tokens in $...$ so the rest of the label stays in the normal font."""
     if not text or ('_{' not in text and '^{' not in text):
         return text
-    stripped = text.strip()
-    if stripped.startswith('$') and stripped.endswith('$') and stripped.count('$') == 2:
-        return text
-    return f'${text}$'
+    if '$' in text:
+        return text  # user is handling math notation manually
+    import re as _re
+    return _re.sub(r'([_^]\{[^}]*\})', r'$\1$', text)
 
 
 def _apply_y_notation(ax, s: dict):
@@ -3686,7 +3757,7 @@ def do_plot(fig: Figure, s: dict) -> str:
 # ── Main window ───────────────────────────────────────────────────────────────
 
 def create_loading_screen() -> QSplashScreen:
-    pixmap = QPixmap(s(760), s(740))
+    pixmap = QPixmap(s(900), s(880))
     pixmap.fill(QColor('#FFFFFF'))
 
     splash = QSplashScreen(pixmap)
@@ -3707,7 +3778,7 @@ def create_loading_screen() -> QSplashScreen:
         # Render at the screen's native pixel density so it stays crisp on Retina
         scr = QApplication.primaryScreen()
         dpr = scr.devicePixelRatio() if scr else 1.0
-        target_w = s(680)
+        target_w = s(918)
         pix = QPixmap(img_path).scaledToWidth(
             int(target_w * dpr), Qt.TransformationMode.SmoothTransformation)
         pix.setDevicePixelRatio(dpr)
@@ -3859,6 +3930,7 @@ class MainWindow(QMainWindow):
         self.header.mode_changed.connect(self._on_mode_change)
         self.header.theme_toggled.connect(self._on_theme_toggle)
         self.header.plot_requested.connect(self._do_plot)
+        self.header.scale_changed.connect(self._on_scale_change)
         # The header spans the full window width above the docks (a top toolbar
         # sits above the left/right dock areas while keeping the menu bar).
         self.header_bar = QToolBar('Header', self)
@@ -4143,6 +4215,11 @@ class MainWindow(QMainWindow):
             action.setChecked(True)
         self._apply_accent(MODE_BY_KEY[key]['accent'])
         self.controls.set_mode(key)
+
+    def _on_scale_change(self, scale: float):
+        spectra_theme.UI_SCALE = scale
+        accent = MODE_BY_KEY[self._current_mode]['accent']
+        QApplication.instance().setStyleSheet(build_style(accent, _APP_DARK, scale))
 
     def _on_theme_toggle(self, dark: bool):
         global _APP_DARK
