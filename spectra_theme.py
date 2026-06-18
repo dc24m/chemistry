@@ -54,7 +54,7 @@ def init_ui_scale(app, base=(2560, 1440)) -> float:
     try:
         geo = app.primaryScreen().geometry()
         proportion = min(geo.width() / base[0], geo.height() / base[1])
-        UI_SCALE = max(0.75, min(2.5, proportion * UI_BOOST))
+        UI_SCALE = max(1.0, min(2.5, proportion * UI_BOOST))
     except Exception:
         UI_SCALE = UI_BOOST
     return UI_SCALE
