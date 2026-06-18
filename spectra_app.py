@@ -68,6 +68,7 @@ matplotlib.rcParams.update({
     'figure.facecolor': 'white',
     'axes.facecolor': 'white',
     'savefig.facecolor': 'white',
+    'mathtext.fontset': 'dejavusans',
 })
 
 
@@ -3123,6 +3124,16 @@ def _apply_font(s: dict):
         matplotlib.rcParams['font.family'] = 'Arial'
 
 
+def _mathify(text: str) -> str:
+    """Wrap label in $...$ if it contains TeX sub/superscript notation (_{} or ^{})."""
+    if not text or ('_{' not in text and '^{' not in text):
+        return text
+    stripped = text.strip()
+    if stripped.startswith('$') and stripped.endswith('$') and stripped.count('$') == 2:
+        return text
+    return f'${text}$'
+
+
 def _apply_y_notation(ax, s: dict):
     """Apply the chosen Y-axis number format. Off (Normal) by default."""
     mode = s.get('y_notation', 'Normal')
@@ -3191,9 +3202,9 @@ def _style_ax(ax, is_left: bool, xlabel: str, ylabel: str, s: dict):
     else:
         ax.minorticks_off()
 
-    ax.set_xlabel(xlabel, fontsize=fontsize, color='black', labelpad=7)
+    ax.set_xlabel(_mathify(xlabel), fontsize=fontsize, color='black', labelpad=7)
     if is_left:
-        ax.set_ylabel(ylabel, fontsize=fontsize, color='black', labelpad=7)
+        ax.set_ylabel(_mathify(ylabel), fontsize=fontsize, color='black', labelpad=7)
     else:
         ax.set_ylabel('')
 
@@ -3207,6 +3218,7 @@ def _add_legend(ax, handles: list, labels: list, s: dict, sources=None):
     ncols = 2 if s.get('legend_2col', False) else 1
     markerfirst = s.get('legend_markerfirst', True)   # False = flip markers to the right
     alignment = s.get('legend_alignment', 'left')
+    labels = [_mathify(l) for l in labels]
     leg = ax.legend(handles, labels, loc=s['legend_loc'],
                     fontsize=fs, fancybox=False, labelspacing=labelspacing,
                     ncols=ncols, markerfirst=markerfirst, alignment=alignment)
@@ -3235,7 +3247,7 @@ def _add_legend(ax, handles: list, labels: list, s: dict, sources=None):
 
 def _panel_title(ax, idx: int, s: dict):
     if s['show_panel_titles'] and idx < len(s['panel_titles']):
-        ax.set_title(s['panel_titles'][idx],
+        ax.set_title(_mathify(s['panel_titles'][idx]),
                      fontsize=s['fontsize'], fontweight='bold', color='black', pad=6)
 
 
@@ -3592,11 +3604,11 @@ def do_plot(fig: Figure, s: dict) -> str:
     if has_title or has_sub:
         top_rect = 0.86
         if has_title:
-            fig.suptitle(s['main_title'], fontsize=s['fontsize'] + 2,
+            fig.suptitle(_mathify(s['main_title']), fontsize=s['fontsize'] + 2,
                          fontweight='bold', color='black', y=0.98)
         if has_sub:
             ysub = 0.945 if has_title else 0.975
-            fig.text(0.5, ysub, s['subtitle'], fontsize=s['fontsize'],
+            fig.text(0.5, ysub, _mathify(s['subtitle']), fontsize=s['fontsize'],
                      color='#555', ha='center', va='top')
 
     if s.get('manual_layout', False):
