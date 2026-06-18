@@ -8,6 +8,9 @@ on:
 jobs:
 
   # ── macOS 12-15 build ───────────────────────────────────────────────────────
+  # Python 3.12 + NumPy 1.26.4: avoids the $NEWLAPACK$ILP64 symbols that
+  # NumPy 2.x requires from macOS 13.3+ Accelerate. NumPy 1.26.4 bundles
+  # its own OpenBLAS so the app runs on macOS 11.0+.
   build-macos:
     runs-on: macos-15
     steps:
@@ -15,10 +18,10 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install pyinstaller numpy matplotlib "PyQt6==6.7.1" "PyQt6-Qt6==6.7.1" pillow
+        run: pip install pyinstaller pillow -r requirements_spectra.txt "PyQt6==6.7.1" "PyQt6-Qt6==6.7.1"
 
       - name: Build
         run: pyinstaller SPECTRAplot.spec
