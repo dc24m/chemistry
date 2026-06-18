@@ -43,7 +43,7 @@ UI_BOOST = 1.25
 
 # Flat px added to every QSS font-size (before UI_SCALE), so text reads larger
 # without enlarging layout dimensions. Raise/lower to taste.
-UI_FONT_BOOST = 2
+UI_FONT_BOOST = 4
 
 
 def init_ui_scale(app, base=(2560, 1440)) -> float:

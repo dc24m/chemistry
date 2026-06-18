@@ -4310,7 +4310,7 @@ def main():
     if chosen_font:
         set_ui_font(chosen_font)
     app.setStyleSheet(build_style(MODES[0]['accent'], False, spectra_theme.UI_SCALE))
-    app.setFont(QFont(chosen_font or 'Segoe UI', s(9)))
+    app.setFont(QFont(chosen_font or 'Segoe UI', s(11)))
     splash = create_loading_screen()
     splash.show()
     app.processEvents()
