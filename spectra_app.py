@@ -287,6 +287,19 @@ def two_theta_to_d(two_theta_deg, lam=1.5406, n=1):
     return d
 
 
+def normalize_xrd_intensity(y):
+    y = np.asarray(y, dtype=float)
+    if y.size == 0:
+        return y
+    finite = np.isfinite(y)
+    if not np.any(finite):
+        return y
+    ymax = np.nanmax(y[finite])
+    if not np.isfinite(ymax) or ymax == 0:
+        return y
+    return y / ymax
+
+
 # ── Spin boxes without arrows and without wheel-scroll ───────────────────────
 
 class FlatSpinBox(QSpinBox):
@@ -1599,6 +1612,14 @@ class ControlPanel(QScrollArea):
         xgl.addLayout(_labeled('Exp offset', self.spin_exp_step))
 
         xgl.addWidget(_sep())
+        self.chk_xrd_normalize = QCheckBox('Normalize XRD intensity')
+        self.chk_xrd_normalize.setChecked(True)
+        xgl.addWidget(self.chk_xrd_normalize)
+        _norm_hint = QLabel('Scales each trace to its own max intensity for\noverlaying files from different instruments.')
+        _norm_hint.setObjectName('fieldlbl')
+        xgl.addWidget(_norm_hint)
+
+        xgl.addWidget(_sep())
         self.chk_xrd_margin_labels = QCheckBox('Right margin trace labels')
         self.chk_xrd_margin_labels.setChecked(False)
         xgl.addWidget(self.chk_xrd_margin_labels)
@@ -2056,6 +2077,7 @@ class ControlPanel(QScrollArea):
             'xrd_lambda': self.spin_lam.value(),
             'xrd_ref_step': self.spin_ref_step.value(),
             'xrd_exp_step': self.spin_exp_step.value(),
+            'xrd_normalize': self.chk_xrd_normalize.isChecked(),
             'xrd_margin_labels': self.chk_xrd_margin_labels.isChecked(),
             'xrd_margin_label_gap': self.spin_xrd_label_gap.value(),
             'xrd_ref_paths': list(self.xrd_ref_paths),
@@ -2111,7 +2133,7 @@ class ControlPanel(QScrollArea):
         'snap_enabled', 'snap_step',
         'pl_baseline_correct',
         'xrd_d_spacing', 'xrd_lambda', 'xrd_ref_step', 'xrd_exp_step',
-        'xrd_margin_labels', 'xrd_margin_label_gap',
+        'xrd_margin_labels', 'xrd_margin_label_gap', 'xrd_normalize',
     }
 
     def _style_preset(self) -> dict:
@@ -2164,6 +2186,7 @@ class ControlPanel(QScrollArea):
             (self.chk_snap,                'snap_enabled'),
             (self.chk_pl_baseline,         'pl_baseline_correct'),
             (self.chk_d,                   'xrd_d_spacing'),
+            (self.chk_xrd_normalize,       'xrd_normalize'),
             (self.chk_xrd_margin_labels,   'xrd_margin_labels'),
             (self.chk_force_sci,           'force_sci'),
         ]:
@@ -3442,6 +3465,7 @@ def _plot_absorbance(axes: list, s: dict) -> int:
 def _plot_xrd(axes: list, s: dict) -> int:
     use_d = s['xrd_d_spacing']
     lam = s['xrd_lambda']
+    do_norm = s.get('xrd_normalize', False)
     total_failed = 0
 
     def maybe_convert(x, y):
@@ -3462,6 +3486,8 @@ def _plot_xrd(axes: list, s: dict) -> int:
         x, y = load_file(path)
         if x is not None:
             x, y = maybe_convert(x, y)
+            if do_norm:
+                y = normalize_xrd_intensity(y)
             lbl = ref_labels[idx] if idx < len(ref_labels) else clean_label(os.path.basename(path))
             col = ref_colors[idx] if idx < len(ref_colors) else '#000000'
             rw = ref_widths[idx] if idx < len(ref_widths) else None
@@ -3478,6 +3504,8 @@ def _plot_xrd(axes: list, s: dict) -> int:
         exp_traces = []
         for x, y, tr in raw:
             x2, y2 = maybe_convert(x, y)
+            if do_norm:
+                y2 = normalize_xrd_intensity(y2)
             exp_traces.append((x2, y2, tr))
 
         n_ref, n_exp = len(ref_traces), len(exp_traces)
