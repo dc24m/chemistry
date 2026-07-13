@@ -362,7 +362,12 @@ class ColorButton(QPushButton):
         self.setText(self._hex.upper())
 
     def _pick(self):
-        c = QColorDialog.getColor(QColor(self._hex), self, 'Pick color')
+        # Force Qt's own dialog instead of Apple's native NSColorPanel — the Qt
+        # dialog has an "HTML" field where hex codes can be typed/pasted directly.
+        c = QColorDialog.getColor(
+            QColor(self._hex), self, 'Pick color',
+            QColorDialog.ColorDialogOption.DontUseNativeDialog,
+        )
         if c.isValid():
             self._hex = c.name()
             self._refresh()
@@ -1592,6 +1597,14 @@ class ControlPanel(QScrollArea):
         pl_note.setWordWrap(True)
         plgl.addWidget(self.chk_pl_baseline)
         plgl.addWidget(pl_note)
+        self.chk_pl_normalize = QCheckBox('Normalize (0–1)')
+        self.chk_pl_normalize.setChecked(False)
+        pl_norm_note = QLabel('Scales each trace to its own max so spectra of\n'
+                              'different intensity overlay on a 0–1 scale.')
+        pl_norm_note.setObjectName('hint')
+        pl_norm_note.setWordWrap(True)
+        plgl.addWidget(self.chk_pl_normalize)
+        plgl.addWidget(pl_norm_note)
         lay.addWidget(self.g_pl)
 
         # ── XRD options
@@ -1618,6 +1631,23 @@ class ControlPanel(QScrollArea):
         _norm_hint = QLabel('Scales each trace to its own max intensity for\noverlaying files from different instruments.')
         _norm_hint.setObjectName('fieldlbl')
         xgl.addWidget(_norm_hint)
+        # Alternative to normalizing: divide every experimental trace by a fixed
+        # number instead. Unlike normalize (which rescales each trace to its own
+        # max), a shared divisor preserves the relative shape/heights. 1.0 = off.
+        self.spin_xrd_divisor = FlatDoubleSpinBox()
+        self.spin_xrd_divisor.setRange(0.0001, 1e9)
+        self.spin_xrd_divisor.setDecimals(4)
+        self.spin_xrd_divisor.setValue(1.0)
+        xgl.addLayout(_labeled('Divide exp by', self.spin_xrd_divisor))
+        _div_hint = QLabel('Divides experimental traces by this number instead\n'
+                           '(keeps relative shape). Ignored while Normalize is on.')
+        _div_hint.setObjectName('fieldlbl')
+        xgl.addWidget(_div_hint)
+        # Normalize and divide are mutually exclusive — grey out the divisor
+        # while Normalize is on so it's clear only one applies.
+        self.spin_xrd_divisor.setEnabled(not self.chk_xrd_normalize.isChecked())
+        self.chk_xrd_normalize.toggled.connect(
+            lambda on: self.spin_xrd_divisor.setEnabled(not on))
 
         xgl.addWidget(_sep())
         self.chk_xrd_margin_labels = QCheckBox('Right margin trace labels')
@@ -2073,11 +2103,13 @@ class ControlPanel(QScrollArea):
             'legend_markerfirst': self.chk_legend_markerfirst.isChecked(),
             'legend_peak_order': self.chk_legend_peak_order.isChecked(),
             'pl_baseline_correct': self.chk_pl_baseline.isChecked(),
+            'pl_normalize': self.chk_pl_normalize.isChecked(),
             'xrd_d_spacing': self.chk_d.isChecked(),
             'xrd_lambda': self.spin_lam.value(),
             'xrd_ref_step': self.spin_ref_step.value(),
             'xrd_exp_step': self.spin_exp_step.value(),
             'xrd_normalize': self.chk_xrd_normalize.isChecked(),
+            'xrd_divisor': self.spin_xrd_divisor.value(),
             'xrd_margin_labels': self.chk_xrd_margin_labels.isChecked(),
             'xrd_margin_label_gap': self.spin_xrd_label_gap.value(),
             'xrd_ref_paths': list(self.xrd_ref_paths),
@@ -2131,9 +2163,10 @@ class ControlPanel(QScrollArea):
         'box_linewidth', 'box_color', 'manual_layout',
         'pa_width', 'pa_height', 'pa_left', 'pa_bottom', 'panel_gap',
         'snap_enabled', 'snap_step',
-        'pl_baseline_correct',
+        'pl_baseline_correct', 'pl_normalize',
         'xrd_d_spacing', 'xrd_lambda', 'xrd_ref_step', 'xrd_exp_step',
         'xrd_margin_labels', 'xrd_margin_label_gap', 'xrd_normalize',
+        'xrd_divisor',
     }
 
     def _style_preset(self) -> dict:
@@ -2168,6 +2201,7 @@ class ControlPanel(QScrollArea):
         if 'xrd_ref_step'           in p: _set(self.spin_ref_step, p['xrd_ref_step'])
         if 'xrd_exp_step'           in p: _set(self.spin_exp_step, p['xrd_exp_step'])
         if 'xrd_margin_label_gap'   in p: _set(self.spin_xrd_label_gap, p['xrd_margin_label_gap'])
+        if 'xrd_divisor'            in p: _set(self.spin_xrd_divisor, p['xrd_divisor'])
         if 'sci_exp'                in p: _set(self.spin_sci_exp, p['sci_exp'])
         # Checkboxes
         for attr, key in [
@@ -2185,6 +2219,7 @@ class ControlPanel(QScrollArea):
             (self.chk_manual_box,          'manual_layout'),
             (self.chk_snap,                'snap_enabled'),
             (self.chk_pl_baseline,         'pl_baseline_correct'),
+            (self.chk_pl_normalize,        'pl_normalize'),
             (self.chk_d,                   'xrd_d_spacing'),
             (self.chk_xrd_normalize,       'xrd_normalize'),
             (self.chk_xrd_margin_labels,   'xrd_margin_labels'),
@@ -3181,8 +3216,18 @@ def _mathify(text: str) -> str:
     return _MATH_RUN.sub(lambda m: f'${m.group(0)}$', text)
 
 
-def _apply_y_notation(ax, s: dict):
-    """Apply the chosen Y-axis number format. Off (Normal) by default."""
+def _apply_y_notation(ax, s: dict, is_left: bool = True):
+    """Apply the chosen Y-axis number format. Off (Normal) by default.
+
+    Only the left-most panel shows Y tick labels (shared-Y look), so only it
+    gets a custom formatter. Forcing the scientific formatter onto the other
+    panels leaves them with an *invisible* ×10ⁿ offset-text artist that still
+    carries text — which corrupts matplotlib's title auto-positioning (the title
+    y is pushed to inf, so it vanishes) and gives those axes a non-finite tight
+    bbox, making bbox_inches='tight' silently drop them from the export.
+    """
+    if not is_left:
+        return
     mode = s.get('y_notation', 'Normal')
     if mode.startswith('Scientific'):
         if s.get('force_sci'):
@@ -3400,6 +3445,7 @@ def _add_xrd_margin_labels(fig: Figure, ax, min_gap: float = 0.25):
 def _plot_pl(axes: list, s: dict) -> int:
     total_failed = 0
     baseline_correct = s.get('pl_baseline_correct', True)
+    normalize = s.get('pl_normalize', False)
     for i, ax in enumerate(axes):
         panel = s['panel_data'][i]
         traces, failed = _load_traces(panel)
@@ -3407,7 +3453,12 @@ def _plot_pl(axes: list, s: dict) -> int:
         corrected = []
         for add_idx, (x, y, tr) in enumerate(traces):
             yc = _pl_trace_y(y, baseline_correct)
-            corrected.append((x, yc, float(np.max(yc)), tr, add_idx))
+            # Ordering (plot z-order, gradient, legend) uses the true intensity,
+            # captured before normalizing — otherwise every peak becomes 1.0.
+            peak = float(np.max(yc)) if len(yc) else 0.0
+            if normalize:
+                yc = normalize_xrd_intensity(yc)
+            corrected.append((x, yc, peak, tr, add_idx))
         # Plot order stays highest-peak-first so the gradient + z-order are unchanged.
         corrected.sort(key=lambda t: t[2], reverse=True)
 
@@ -3429,7 +3480,12 @@ def _plot_pl(axes: list, s: dict) -> int:
         ls = [e[3] for e in legend_order]
         srcs = [e[4] for e in legend_order]
 
-        ylabel = 'Baseline-corrected PL' if baseline_correct else 'PL intensity'
+        if normalize:
+            ylabel = 'Normalized PL (a.u.)'
+        elif baseline_correct:
+            ylabel = 'Baseline-corrected PL'
+        else:
+            ylabel = 'PL intensity'
         _style_ax(ax, i == 0, 'Wavelength λ (nm)', ylabel, s)
         _add_legend(ax, hs, ls, s, srcs)
         _panel_title(ax, i, s)
@@ -3466,6 +3522,10 @@ def _plot_xrd(axes: list, s: dict) -> int:
     use_d = s['xrd_d_spacing']
     lam = s['xrd_lambda']
     do_norm = s.get('xrd_normalize', False)
+    # Divisor is the alternative to normalizing; it only kicks in when normalize
+    # is off. 1.0 (or anything non-positive) is a no-op.
+    divisor = s.get('xrd_divisor', 1.0)
+    do_divide = (not do_norm) and divisor and divisor > 0 and divisor != 1.0
     total_failed = 0
 
     def maybe_convert(x, y):
@@ -3486,8 +3546,8 @@ def _plot_xrd(axes: list, s: dict) -> int:
         x, y = load_file(path)
         if x is not None:
             x, y = maybe_convert(x, y)
-            if do_norm:
-                y = normalize_xrd_intensity(y)
+            # Normalize only applies to experimental traces — references keep
+            # their own intensities so their relative peak heights stay intact.
             lbl = ref_labels[idx] if idx < len(ref_labels) else clean_label(os.path.basename(path))
             col = ref_colors[idx] if idx < len(ref_colors) else '#000000'
             rw = ref_widths[idx] if idx < len(ref_widths) else None
@@ -3506,6 +3566,8 @@ def _plot_xrd(axes: list, s: dict) -> int:
             x2, y2 = maybe_convert(x, y)
             if do_norm:
                 y2 = normalize_xrd_intensity(y2)
+            elif do_divide:
+                y2 = y2 / divisor
             exp_traces.append((x2, y2, tr))
 
         n_ref, n_exp = len(ref_traces), len(exp_traces)
@@ -3717,8 +3779,10 @@ def do_plot(fig: Figure, s: dict) -> str:
                 ax.set_ylim(lo, hi)
 
     # Y-axis number format — applied after limits so a forced exponent sticks.
-    for ax in axes:
-        _apply_y_notation(ax, s)
+    # Only the left panel carries Y numbers, so notation is applied there alone;
+    # see _apply_y_notation for why the other panels must be left untouched.
+    for idx, ax in enumerate(axes):
+        _apply_y_notation(ax, s, is_left=(idx == 0))
 
     if xrd_margin_labels:
         _add_xrd_margin_labels(
