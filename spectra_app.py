@@ -859,7 +859,21 @@ class PanelFileWidget(QWidget):
         self.btn_rem.clicked.connect(self._remove)
         br.addWidget(self.btn_add, 2)
         br.addWidget(self.btn_rem, 1)
+        # Reorder the selected trace — this is what determines the vertical
+        # stacking order (and hence the margin-label order) in XRD plots.
+        self.btn_up = QPushButton('▲')
+        self.btn_down = QPushButton('▼')
+        for b, tip in ((self.btn_up, 'Move trace up'), (self.btn_down, 'Move trace down')):
+            b.setObjectName('secondary')
+            b.setFixedWidth(s(34))
+            b.setToolTip(f'{tip} (affects XRD stacking order & margin labels)')
+        self.btn_up.clicked.connect(lambda: self._move_selected(-1))
+        self.btn_down.clicked.connect(lambda: self._move_selected(1))
+        br.addWidget(self.btn_up)
+        br.addWidget(self.btn_down)
         lay.addLayout(br)
+        self.lst.currentRowChanged.connect(self._update_move_buttons)
+        self._update_move_buttons(self.lst.currentRow())
 
         self.btn_edit = QPushButton('Edit Trace…')
         self.btn_edit.setObjectName('secondary')
@@ -922,6 +936,7 @@ class PanelFileWidget(QWidget):
                 added = True
         if added:
             self.changed.emit()
+        self._update_move_buttons(self.lst.currentRow())
 
     def _remove(self):
         rows = sorted(
@@ -932,6 +947,35 @@ class PanelFileWidget(QWidget):
             self.traces.pop(r)
         if rows:
             self.changed.emit()
+        self._update_move_buttons(self.lst.currentRow())
+
+    def _rebuild_list(self):
+        """Redraw self.lst from self.traces. Needed after a reorder since each
+        row's _TraceRow widget is owned by its QListWidgetItem and can't just
+        be swapped in place — same construction as _add()."""
+        self.lst.clear()
+        for tr in self.traces:
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, 30))
+            self.lst.addItem(item)
+            self.lst.setItemWidget(item, _TraceRow(tr, self.changed.emit))
+
+    def _move_selected(self, delta: int):
+        row = self.lst.currentRow()
+        if row < 0:
+            return
+        new_row = row + delta
+        if new_row < 0 or new_row >= len(self.traces):
+            return
+        self.traces[row], self.traces[new_row] = self.traces[new_row], self.traces[row]
+        self._rebuild_list()
+        self.lst.setCurrentRow(new_row)
+        self.changed.emit()
+
+    def _update_move_buttons(self, row: int):
+        n = len(self.traces)
+        self.btn_up.setEnabled(row > 0)
+        self.btn_down.setEnabled(0 <= row < n - 1)
 
     def clear(self):
         """Drop every trace from this panel. Used to give a freshly added
@@ -1648,6 +1692,15 @@ class ControlPanel(QScrollArea):
         self.spin_xrd_divisor.setEnabled(not self.chk_xrd_normalize.isChecked())
         self.chk_xrd_normalize.toggled.connect(
             lambda on: self.spin_xrd_divisor.setEnabled(not on))
+        # Plot the experimental traces as log10(intensity) — reveals weak peaks.
+        # References are left on their linear values (they share the axis).
+        self.chk_xrd_log = QCheckBox('Log scale (experimental)')
+        self.chk_xrd_log.setChecked(False)
+        xgl.addWidget(self.chk_xrd_log)
+        _log_hint = QLabel('Plots experimental traces as log₁₀(intensity) to\n'
+                           'show weak peaks. References stay linear.')
+        _log_hint.setObjectName('fieldlbl')
+        xgl.addWidget(_log_hint)
 
         xgl.addWidget(_sep())
         self.chk_xrd_margin_labels = QCheckBox('Right margin trace labels')
@@ -1680,7 +1733,20 @@ class ControlPanel(QScrollArea):
         self.btn_ref_add.clicked.connect(self._xrd_add_refs)
         self.btn_ref_rem.clicked.connect(self._xrd_rem_refs)
         xrd_br.addWidget(self.btn_ref_add, 2); xrd_br.addWidget(self.btn_ref_rem, 1)
+        # Reorder the selected reference — determines its position in the XRD
+        # stacking offsets (and hence the right-margin label order).
+        self.btn_ref_up = QPushButton('▲')
+        self.btn_ref_down = QPushButton('▼')
+        for b, tip in ((self.btn_ref_up, 'Move reference up'), (self.btn_ref_down, 'Move reference down')):
+            b.setObjectName('secondary')
+            b.setFixedWidth(s(34))
+            b.setToolTip(f'{tip} (affects XRD stacking order & margin labels)')
+        self.btn_ref_up.clicked.connect(lambda: self._xrd_move_ref(-1))
+        self.btn_ref_down.clicked.connect(lambda: self._xrd_move_ref(1))
+        xrd_br.addWidget(self.btn_ref_up); xrd_br.addWidget(self.btn_ref_down)
         xgl.addLayout(xrd_br)
+        self.xrd_ref_list.currentRowChanged.connect(self._update_xrd_ref_move_buttons)
+        self._update_xrd_ref_move_buttons(self.xrd_ref_list.currentRow())
         self.g_xrd.setVisible(False)
         lay.addWidget(self.g_xrd)
 
@@ -1828,6 +1894,7 @@ class ControlPanel(QScrollArea):
                 self.xrd_ref_widths.append(None)
                 self.xrd_ref_styles.append('solid')
                 self.xrd_ref_list.addItem(clean_label(os.path.basename(p)))
+        self._update_xrd_ref_move_buttons(self.xrd_ref_list.currentRow())
 
     def _xrd_rem_refs(self):
         rows = sorted(
@@ -1841,6 +1908,27 @@ class ControlPanel(QScrollArea):
                         self.xrd_ref_widths, self.xrd_ref_styles):
                 if r < len(lst):
                     lst.pop(r)
+        self._update_xrd_ref_move_buttons(self.xrd_ref_list.currentRow())
+
+    def _xrd_move_ref(self, delta: int):
+        row = self.xrd_ref_list.currentRow()
+        if row < 0:
+            return
+        new_row = row + delta
+        if new_row < 0 or new_row >= len(self.xrd_ref_paths):
+            return
+        for lst in (self.xrd_ref_paths, self.xrd_ref_colors, self.xrd_ref_labels,
+                    self.xrd_ref_widths, self.xrd_ref_styles):
+            if new_row < len(lst):
+                lst[row], lst[new_row] = lst[new_row], lst[row]
+        self.refresh_xrd_ref_list()
+        self.xrd_ref_list.setCurrentRow(new_row)
+        self.plot_requested.emit()
+
+    def _update_xrd_ref_move_buttons(self, row: int):
+        n = len(self.xrd_ref_paths)
+        self.btn_ref_up.setEnabled(row > 0)
+        self.btn_ref_down.setEnabled(0 <= row < n - 1)
 
     def edit_reference(self, idx: int):
         """Open the shared edit box for reference at `idx` (list or canvas)."""
@@ -2110,6 +2198,7 @@ class ControlPanel(QScrollArea):
             'xrd_exp_step': self.spin_exp_step.value(),
             'xrd_normalize': self.chk_xrd_normalize.isChecked(),
             'xrd_divisor': self.spin_xrd_divisor.value(),
+            'xrd_log_exp': self.chk_xrd_log.isChecked(),
             'xrd_margin_labels': self.chk_xrd_margin_labels.isChecked(),
             'xrd_margin_label_gap': self.spin_xrd_label_gap.value(),
             'xrd_ref_paths': list(self.xrd_ref_paths),
@@ -2166,7 +2255,7 @@ class ControlPanel(QScrollArea):
         'pl_baseline_correct', 'pl_normalize',
         'xrd_d_spacing', 'xrd_lambda', 'xrd_ref_step', 'xrd_exp_step',
         'xrd_margin_labels', 'xrd_margin_label_gap', 'xrd_normalize',
-        'xrd_divisor',
+        'xrd_divisor', 'xrd_log_exp',
     }
 
     def _style_preset(self) -> dict:
@@ -2222,6 +2311,7 @@ class ControlPanel(QScrollArea):
             (self.chk_pl_normalize,        'pl_normalize'),
             (self.chk_d,                   'xrd_d_spacing'),
             (self.chk_xrd_normalize,       'xrd_normalize'),
+            (self.chk_xrd_log,             'xrd_log_exp'),
             (self.chk_xrd_margin_labels,   'xrd_margin_labels'),
             (self.chk_force_sci,           'force_sci'),
         ]:
@@ -3526,6 +3616,8 @@ def _plot_xrd(axes: list, s: dict) -> int:
     # is off. 1.0 (or anything non-positive) is a no-op.
     divisor = s.get('xrd_divisor', 1.0)
     do_divide = (not do_norm) and divisor and divisor > 0 and divisor != 1.0
+    # Log scale applies to experimental traces only; references stay linear.
+    do_log = s.get('xrd_log_exp', False)
     total_failed = 0
 
     def maybe_convert(x, y):
@@ -3568,6 +3660,10 @@ def _plot_xrd(axes: list, s: dict) -> int:
                 y2 = normalize_xrd_intensity(y2)
             elif do_divide:
                 y2 = y2 / divisor
+            if do_log:
+                # log10, with non-positive values dropped (NaN) so the line just
+                # breaks there instead of shooting to -inf.
+                y2 = np.log10(np.where(np.asarray(y2, dtype=float) > 0, y2, np.nan))
             exp_traces.append((x2, y2, tr))
 
         n_ref, n_exp = len(ref_traces), len(exp_traces)
@@ -3598,7 +3694,8 @@ def _plot_xrd(axes: list, s: dict) -> int:
             hs.append(ln); ls.append(tr['display_name']); srcs.append(('trace', tr.get('uid')))
 
         xlabel = 'd-spacing (Å)' if use_d else '2θ (°)'
-        _style_ax(ax, i == 0, xlabel, 'Intensity', s)
+        ylabel = 'log_{10}(Intensity)' if do_log else 'Intensity'
+        _style_ax(ax, i == 0, xlabel, ylabel, s)
         _add_legend(ax, hs, ls, s, srcs)
         _panel_title(ax, i, s)
         if use_d:
