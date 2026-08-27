@@ -300,6 +300,27 @@ def normalize_xrd_intensity(y):
     return y / ymax
 
 
+def savgol_smooth(y, window_length: int, polyorder: int = 3):
+    """Numpy-only Savitzky-Golay smoothing (no scipy dependency in this app).
+    Fits a local polynomial per window via least squares, so peak shape is
+    preserved far better than a plain moving average. No-ops (returns y
+    unchanged) if the window is too small or larger than the data."""
+    y = np.asarray(y, dtype=float)
+    n = y.size
+    window_length = int(window_length)
+    if window_length % 2 == 0:
+        window_length += 1
+    if window_length < 3 or n < window_length:
+        return y
+    order = min(polyorder, window_length - 1)
+    half = window_length // 2
+    exponents = np.arange(order + 1)
+    design = np.array([[k ** e for e in exponents] for k in range(-half, half + 1)])
+    coeffs = np.linalg.pinv(design)[0]
+    y_padded = np.pad(y, (half, half), mode='reflect')
+    return np.convolve(y_padded, coeffs[::-1], mode='valid')
+
+
 # ── Spin boxes without arrows and without wheel-scroll ───────────────────────
 
 class FlatSpinBox(QSpinBox):
@@ -1630,6 +1651,27 @@ class ControlPanel(QScrollArea):
         self.dock_groups = [g_tick, g_num, g_legend, g_box]
         self._toggle_legend()
 
+        # ── Smoothing (shared across PL / Absorbance / XRD)
+        self.g_smooth = QGroupBox('Smoothing')
+        smgl = QVBoxLayout(self.g_smooth)
+        smgl.setSpacing(vs(9))
+        self.chk_smooth = QCheckBox('Smooth traces (Savitzky–Golay)')
+        self.chk_smooth.setChecked(False)
+        smgl.addWidget(self.chk_smooth)
+        self.spin_smooth = FlatSpinBox()
+        self.spin_smooth.setRange(3, 99)
+        self.spin_smooth.setSingleStep(2)
+        self.spin_smooth.setValue(9)
+        smgl.addLayout(_labeled('Amount', self.spin_smooth))
+        smooth_hint = QLabel('Averages each trace over N nearby points to reduce\n'
+                             'CSV noise while preserving peak shape. Higher = smoother.')
+        smooth_hint.setObjectName('hint')
+        smooth_hint.setWordWrap(True)
+        smgl.addWidget(smooth_hint)
+        self.spin_smooth.setEnabled(self.chk_smooth.isChecked())
+        self.chk_smooth.toggled.connect(self.spin_smooth.setEnabled)
+        lay.addWidget(self.g_smooth)
+
         # ── PL options
         self.g_pl = QGroupBox('PL Options')
         plgl = QVBoxLayout(self.g_pl)
@@ -1795,6 +1837,7 @@ class ControlPanel(QScrollArea):
         self.g_data.setVisible(not is_iv)
         self.g_axes.setVisible(not is_iv)
         self.g_iv.setVisible(is_iv)
+        self.g_smooth.setVisible(not is_iv)
         self.g_pl.setVisible(key == 'pl')
         self.g_xrd.setVisible(key == 'xrd')
 
@@ -2190,6 +2233,8 @@ class ControlPanel(QScrollArea):
             'legend_alignment': self.combo_legend_align.currentText(),
             'legend_markerfirst': self.chk_legend_markerfirst.isChecked(),
             'legend_peak_order': self.chk_legend_peak_order.isChecked(),
+            'smooth_enabled': self.chk_smooth.isChecked(),
+            'smooth_amount': self.spin_smooth.value(),
             'pl_baseline_correct': self.chk_pl_baseline.isChecked(),
             'pl_normalize': self.chk_pl_normalize.isChecked(),
             'xrd_d_spacing': self.chk_d.isChecked(),
@@ -2252,6 +2297,7 @@ class ControlPanel(QScrollArea):
         'box_linewidth', 'box_color', 'manual_layout',
         'pa_width', 'pa_height', 'pa_left', 'pa_bottom', 'panel_gap',
         'snap_enabled', 'snap_step',
+        'smooth_enabled', 'smooth_amount',
         'pl_baseline_correct', 'pl_normalize',
         'xrd_d_spacing', 'xrd_lambda', 'xrd_ref_step', 'xrd_exp_step',
         'xrd_margin_labels', 'xrd_margin_label_gap', 'xrd_normalize',
@@ -2286,6 +2332,7 @@ class ControlPanel(QScrollArea):
         if 'pa_bottom'              in p: _set(self.spin_pa_bottom, p['pa_bottom'])
         if 'panel_gap'              in p: _set(self.spin_panel_gap, p['panel_gap'])
         if 'snap_step'              in p: _set(self.spin_snap_step, p['snap_step'])
+        if 'smooth_amount'          in p: _set(self.spin_smooth, p['smooth_amount'])
         if 'xrd_lambda'             in p: _set(self.spin_lam, p['xrd_lambda'])
         if 'xrd_ref_step'           in p: _set(self.spin_ref_step, p['xrd_ref_step'])
         if 'xrd_exp_step'           in p: _set(self.spin_exp_step, p['xrd_exp_step'])
@@ -2307,6 +2354,7 @@ class ControlPanel(QScrollArea):
             (self.chk_legend_markerfirst,  'legend_markerfirst'),
             (self.chk_manual_box,          'manual_layout'),
             (self.chk_snap,                'snap_enabled'),
+            (self.chk_smooth,              'smooth_enabled'),
             (self.chk_pl_baseline,         'pl_baseline_correct'),
             (self.chk_pl_normalize,        'pl_normalize'),
             (self.chk_d,                   'xrd_d_spacing'),
@@ -3433,14 +3481,17 @@ def _panel_title(ax, idx: int, s: dict):
                      fontsize=s['fontsize'], fontweight='bold', color='black', pad=6)
 
 
-def _load_traces(panel: dict) -> tuple[list, int]:
-    """Load visible traces for a panel. Returns (list of (x, y, trace), failed)."""
+def _load_traces(panel: dict, smooth_window: int = 0) -> tuple[list, int]:
+    """Load visible traces for a panel. Returns (list of (x, y, trace), failed).
+    smooth_window >= 3 applies Savitzky-Golay smoothing to reduce CSV noise."""
     result, failed = [], 0
     for tr in panel['traces']:
         if not tr.get('visible', True):
             continue
         x, y = load_file(tr['path'])
         if x is not None:
+            if smooth_window >= 3:
+                y = savgol_smooth(y, smooth_window)
             result.append((x, y, tr))
         else:
             failed += 1
@@ -3536,9 +3587,10 @@ def _plot_pl(axes: list, s: dict) -> int:
     total_failed = 0
     baseline_correct = s.get('pl_baseline_correct', True)
     normalize = s.get('pl_normalize', False)
+    smooth_window = s['smooth_amount'] if s.get('smooth_enabled') else 0
     for i, ax in enumerate(axes):
         panel = s['panel_data'][i]
-        traces, failed = _load_traces(panel)
+        traces, failed = _load_traces(panel, smooth_window)
         total_failed += failed
         corrected = []
         for add_idx, (x, y, tr) in enumerate(traces):
@@ -3585,9 +3637,10 @@ def _plot_pl(axes: list, s: dict) -> int:
 def _plot_absorbance(axes: list, s: dict) -> int:
     ylabel = 'Absorbance (a.u.)'
     total_failed = 0
+    smooth_window = s['smooth_amount'] if s.get('smooth_enabled') else 0
     for i, ax in enumerate(axes):
         panel = s['panel_data'][i]
-        traces, failed = _load_traces(panel)
+        traces, failed = _load_traces(panel, smooth_window)
         total_failed += failed
         with_pk = [(x, y, float(np.max(y)) if len(y) else 0.0, tr)
                    for x, y, tr in traces]
@@ -3618,6 +3671,7 @@ def _plot_xrd(axes: list, s: dict) -> int:
     do_divide = (not do_norm) and divisor and divisor > 0 and divisor != 1.0
     # Log scale applies to experimental traces only; references stay linear.
     do_log = s.get('xrd_log_exp', False)
+    smooth_window = s['smooth_amount'] if s.get('smooth_enabled') else 0
     total_failed = 0
 
     def maybe_convert(x, y):
@@ -3651,7 +3705,7 @@ def _plot_xrd(axes: list, s: dict) -> int:
 
     for i, ax in enumerate(axes):
         panel = s['panel_data'][i]
-        raw, failed = _load_traces(panel)
+        raw, failed = _load_traces(panel, smooth_window)
         total_failed += failed
         exp_traces = []
         for x, y, tr in raw:

@@ -14,9 +14,14 @@ datas = [
 ]
 
 # ── only the hidden imports that PyInstaller genuinely misses ────────────────
+# backend_pdf/backend_svg are picked at runtime by matplotlib's format->module
+# registry (savefig(format=...)), not via a literal matplotlib.use() call, so
+# PyInstaller's static analysis and its own matplotlib hook never see them.
 hiddenimports = [
     'matplotlib.backends.backend_qtagg',
     'matplotlib.backends.backend_agg',
+    'matplotlib.backends.backend_pdf',
+    'matplotlib.backends.backend_svg',
     'PyQt6.QtPrintSupport',
 ]
 
