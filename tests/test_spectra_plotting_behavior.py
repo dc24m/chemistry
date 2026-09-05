@@ -417,5 +417,222 @@ class SpectraPlottingBehaviorTest(unittest.TestCase):
         self.assertEqual(settings["pos_path"], r"C:\data\pos.csv")
 
 
+def write_ta_dat(path):
+    """A small TA map in the collaborator's on-disk format."""
+    import numpy as np
+
+    # Enough delays inside the 0.6-6500 ps fit window for fit_global_map to run.
+    time = np.concatenate([np.linspace(-10.0, 0.0, 3),
+                           np.geomspace(0.2, 6000.0, 25)])
+    wave = np.linspace(400.0, 540.0, 15)
+    basis = spectra_app.ta_data.kinetic_basis(time, 0.4, 80.0, 3500.0)
+    z = (basis @ np.vstack([np.ones(wave.size) * 5.0,
+                            -np.ones(wave.size) * 3.0])).T
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("XAxisTitle Wavelength (nm)\n")
+        f.write("YAxisTitle Delay (ps)\n")
+        f.write("0.0 " + " ".join("%.6E" % w for w in wave) + "\n")
+        for j, t in enumerate(time):
+            f.write("%.6E " % t + " ".join("%.6E" % v for v in z[:, j]) + "\n")
+    return path
+
+
+def ta_settings(tmpdir, **overrides):
+    dat = write_ta_dat(os.path.join(tmpdir, "sample.dat"))
+    settings = base_settings(
+        plot_type="ta",
+        n_panels=1,
+        panel_data=[{"traces": [], "gradient": ("#000000", "#000000"),
+                     "use_gradient": True}],
+        panel_x_limits=[{"auto_x": True, "x_min": 0.0, "x_max": 1.0}],
+        auto_x=True,
+        panel_titles=["A"],
+        ta_datasets=[{"uid": "u1", "path": dat, "display_name": "S n4",
+                      "color": "#000000", "uvvis_path": ""}],
+        ta_plot_kind="map",
+        ta_trim=False,
+        ta_trim_range=(400.0, 530.0),
+        ta_cmap="Spectral",
+        ta_time_scale="Symlog",
+        ta_linthresh=5.0,
+        ta_color_pct=98.0,
+        ta_colorbar=False,
+        ta_windows=list(spectra_app.ta_data.DEFAULT_TIME_WINDOWS_PS),
+        ta_zero_line=True,
+        ta_uvvis_overlay=True,
+        ta_uvvis_auto=True,
+        ta_high_band=(420.0, 450.0),
+        ta_low_band=(520.0, 530.0),
+        ta_high_label="High-bandgap phase",
+        ta_low_label="MAPbBr3",
+        ta_normalize=False,
+        ta_norm_window=(900.0, 1100.0),
+        ta_fit_overlay=False,
+        ta_fit_annotate=False,
+        ta_fits={},
+        show_legend=True,
+    )
+    settings.update(overrides)
+    return settings
+
+
+class TAPlottingTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_map_uses_delay_and_wavelength_axes(self):
+        fig = Figure()
+        message = spectra_app.do_plot(fig, ta_settings(self.tmp.name))
+
+        ax = fig.axes[0]
+        self.assertEqual(ax.get_xlabel(), "Pump-probe delay (ps)")
+        self.assertIn("Wavelength", ax.get_ylabel())
+        self.assertEqual(ax.get_xscale(), "symlog")
+        self.assertIn("TA", message)
+
+    def test_map_colorbar_adds_a_second_axes_only_when_enabled(self):
+        fig = Figure()
+        spectra_app.do_plot(fig, ta_settings(self.tmp.name, ta_colorbar=False))
+        self.assertEqual(len(fig.axes), 1)
+
+        fig = Figure()
+        spectra_app.do_plot(fig, ta_settings(self.tmp.name, ta_colorbar=True))
+        self.assertEqual(len(fig.axes), 2)
+
+    def test_slices_draw_one_line_per_delay_window(self):
+        fig = Figure()
+        spectra_app.do_plot(fig, ta_settings(self.tmp.name, ta_plot_kind="slices"))
+
+        ax = fig.axes[0]
+        self.assertIn("Wavelength", ax.get_xlabel())
+        # One line per window, plus the zero line.
+        windows = len(spectra_app.ta_data.DEFAULT_TIME_WINDOWS_PS)
+        self.assertEqual(len(ax.lines), windows + 1)
+
+    def test_slices_uvvis_overlay_creates_a_twin_axis(self):
+        uv = os.path.join(self.tmp.name, "uvvis.csv")
+        with open(uv, "w", encoding="utf-8") as f:
+            f.write("nm, A\n")
+            for w in range(400, 541, 10):
+                f.write(f"{w}.0, 0.5\n")
+
+        settings = ta_settings(self.tmp.name, ta_plot_kind="slices")
+        settings["ta_datasets"][0]["uvvis_path"] = uv
+        fig = Figure()
+        spectra_app.do_plot(fig, settings)
+
+        self.assertEqual(len(fig.axes), 2)
+        self.assertEqual(fig.axes[1].get_ylabel(), "Absorbance (OD)")
+
+    def test_slices_skip_the_twin_axis_when_overlay_is_off(self):
+        uv = os.path.join(self.tmp.name, "uvvis.csv")
+        with open(uv, "w", encoding="utf-8") as f:
+            f.write("nm, A\n400.0, 0.5\n500.0, 0.4\n")
+
+        settings = ta_settings(self.tmp.name, ta_plot_kind="slices",
+                               ta_uvvis_overlay=False)
+        settings["ta_datasets"][0]["uvvis_path"] = uv
+        fig = Figure()
+        spectra_app.do_plot(fig, settings)
+
+        self.assertEqual(len(fig.axes), 1)
+
+    def test_kinetics_plots_both_bands_against_delay(self):
+        fig = Figure()
+        spectra_app.do_plot(fig, ta_settings(self.tmp.name, ta_plot_kind="kinetics"))
+
+        ax = fig.axes[0]
+        self.assertEqual(ax.get_xlabel(), "Pump-probe delay (ps)")
+        self.assertEqual(ax.get_xscale(), "symlog")
+        self.assertEqual(len(ax.lines), 2)
+
+    def test_kinetics_label_reflects_normalization(self):
+        fig = Figure()
+        spectra_app.do_plot(fig, ta_settings(self.tmp.name, ta_plot_kind="kinetics",
+                                             ta_normalize=True))
+        self.assertIn("normalized", fig.axes[0].get_ylabel())
+
+        fig = Figure()
+        spectra_app.do_plot(fig, ta_settings(self.tmp.name, ta_plot_kind="kinetics",
+                                             ta_normalize=False))
+        self.assertIn("mOD", fig.axes[0].get_ylabel())
+
+    def test_sas_without_a_fit_says_so_instead_of_drawing_nothing(self):
+        fig = Figure()
+        spectra_app.do_plot(fig, ta_settings(self.tmp.name, ta_plot_kind="sas"))
+
+        texts = [t.get_text() for t in fig.axes[0].texts]
+        self.assertIn("Run the global fit first", texts)
+
+    def test_sas_draws_both_components_once_fitted(self):
+        settings = ta_settings(self.tmp.name, ta_plot_kind="sas")
+        m = spectra_app.load_ta_map(settings["ta_datasets"][0]["path"])
+        settings["ta_fits"] = {"u1": spectra_app.ta_data.fit_global_map(m)}
+
+        fig = Figure()
+        spectra_app.do_plot(fig, settings)
+
+        # Two species-associated spectra plus the zero line.
+        self.assertEqual(len(fig.axes[0].lines), 3)
+
+    def test_unreadable_dat_counts_as_failed_instead_of_raising(self):
+        bad = os.path.join(self.tmp.name, "bad.dat")
+        with open(bad, "w", encoding="utf-8") as f:
+            f.write("not a TA file\n")
+
+        settings = ta_settings(self.tmp.name)
+        settings["ta_datasets"][0]["path"] = bad
+        fig = Figure()
+        message = spectra_app.do_plot(fig, settings)
+
+        self.assertIn("failed to load", message)
+
+    def test_empty_panel_still_gets_styled_axes(self):
+        settings = ta_settings(self.tmp.name, ta_datasets=[None])
+        fig = Figure()
+        spectra_app.do_plot(fig, settings)
+
+        self.assertEqual(fig.axes[0].get_xlabel(), "Pump-probe delay (ps)")
+
+    def test_trim_drops_channels_outside_the_probe_window(self):
+        wide = ta_settings(self.tmp.name, ta_plot_kind="slices", ta_trim=False)
+        narrow = ta_settings(self.tmp.name, ta_plot_kind="slices", ta_trim=True,
+                             ta_trim_range=(420.0, 500.0))
+
+        fig = Figure()
+        spectra_app.do_plot(fig, wide)
+        wide_points = len(fig.axes[0].lines[0].get_xdata())
+
+        fig = Figure()
+        spectra_app.do_plot(fig, narrow)
+        narrow_points = len(fig.axes[0].lines[0].get_xdata())
+
+        self.assertLess(narrow_points, wide_points)
+
+    def test_ta_dataset_widget_reports_none_until_a_file_is_loaded(self):
+        qapp()
+        widget = spectra_app.TADataSetWidget(0)
+        self.assertIsNone(widget.settings())
+
+        widget.dataset = spectra_app.make_ta_dataset(
+            write_ta_dat(os.path.join(self.tmp.name, "widget.dat")))
+        widget.edit_name.setText("ES n1.5")
+        self.assertEqual(widget.settings()["display_name"], "ES n1.5")
+
+    def test_ta_dataset_widget_state_round_trips(self):
+        qapp()
+        widget = spectra_app.TADataSetWidget(0)
+        widget.dataset = spectra_app.make_ta_dataset(
+            write_ta_dat(os.path.join(self.tmp.name, "rt.dat")))
+        widget.edit_name.setText("Sample A")
+        state = widget.get_state()
+
+        other = spectra_app.TADataSetWidget(0)
+        other.set_state(state)
+        self.assertEqual(other.settings()["path"], widget.settings()["path"])
+        self.assertEqual(other.display_name(), "Sample A")
+
+
 if __name__ == "__main__":
     unittest.main()

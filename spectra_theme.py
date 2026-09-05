@@ -94,6 +94,7 @@ MODES = [
     {'key': 'absorbance', 'label': 'Absorbance',        'accent': '#38BDF8'},
     {'key': 'xrd',        'label': 'XRD',               'accent': '#A78BFA'},
     {'key': 'iv',         'label': 'IV curve',          'accent': '#FBBF24'},
+    {'key': 'ta',         'label': 'Transient Abs.',    'accent': '#34D399'},
 ]
 for _m in MODES:
     _m['title'] = darken(_m['accent'], 0.45)

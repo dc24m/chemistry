@@ -54,6 +54,7 @@ except ModuleNotFoundError as exc:
     ) from exc
 
 import spectra_theme
+import ta_data
 from spectra_theme import (
     MODES, MODE_BY_KEY, darken, add_shadow, build_style, s, vs, init_ui_scale,
     set_ui_font,
@@ -220,6 +221,31 @@ def _parse_iv_csv(path: str):
     if not voltages:
         return None, None
     return np.array(voltages), np.array(currents)
+
+
+# ── Transient absorption ──────────────────────────────────────────────────────
+# TA files are 2-D maps rather than the 1-D traces every other mode loads, so the
+# parsing and kinetics live in ta_data (numpy only, Qt free). Only the caching
+# and the per-dataset UI record belong here.
+
+def load_ta_map(path: str):
+    """Load a TA .dat map, cached by mtime+size like every other loader."""
+    return _load_cached('ta', path, ta_data.parse_ta_map)
+
+
+TA_SET_COLORS = ['#34D399', '#38BDF8', '#F472B6', '#FBBF24', '#A78BFA']
+
+
+def make_ta_dataset(path: str) -> dict:
+    """Per-dataset customization record, mirroring make_trace for 1-D files."""
+    info = ta_data.parse_ta_filename(path)
+    return {
+        'uid': uuid.uuid4().hex,
+        'path': path,
+        'display_name': info['label'],
+        'color': '#000000',
+        'uvvis_path': '',
+    }
 
 
 def choose_iv_current_unit(max_abs_current: float) -> tuple[float, str]:
@@ -508,7 +534,7 @@ class ModeTabBar(QWidget):
     mode_changed = pyqtSignal(str)
 
     # Hard per-tab minimum widths so long labels never clip, regardless of font.
-    _MIN_W = {'pl': 190, 'absorbance': 142, 'xrd': 78, 'iv': 96}
+    _MIN_W = {'pl': 190, 'absorbance': 142, 'xrd': 78, 'iv': 96, 'ta': 132}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -803,6 +829,47 @@ class ReferenceEditDialog(QDialog):
 
 
 # ── Per-row trace widget (name label + eye toggle) ───────────────────────────
+
+class TAWindowDialog(QDialog):
+    """Edit one spectral-slice delay window: the range averaged and its label.
+
+    The label is what appears in the legend (the nominal delay, e.g. "100 ps"),
+    while the range is what is actually averaged (95-105 ps) — averaging a few
+    delays instead of picking one is what keeps the slices smooth.
+    """
+
+    def __init__(self, t0: float, t1: float, label: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Edit Delay Window')
+        self.setMinimumWidth(s(320))
+
+        form = QFormLayout(self)
+        form.setSpacing(s(10))
+
+        self.spin_t0 = FlatDoubleSpinBox()
+        self.spin_t1 = FlatDoubleSpinBox()
+        for sb, value in ((self.spin_t0, t0), (self.spin_t1, t1)):
+            sb.setRange(-100000.0, 1000000.0)
+            sb.setDecimals(2)
+            sb.setValue(float(value))
+        form.addRow('From (ps)', self.spin_t0)
+        form.addRow('To (ps)', self.spin_t1)
+
+        self.edit_label = QLineEdit(label)
+        form.addRow('Legend label', self.edit_label)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def values(self) -> tuple:
+        t0 = self.spin_t0.value()
+        t1 = self.spin_t1.value()
+        label = self.edit_label.text().strip() or f'{0.5 * (t0 + t1):g} ps'
+        return (t0, t1, label)
+
 
 class _TraceRow(QWidget):
     """Label + eye button for one trace entry in the file list."""
@@ -1196,6 +1263,196 @@ class IVDataSetWidget(QWidget):
         }
 
 
+class TADataSetWidget(QWidget):
+    """One TA dataset per panel: the .dat map plus an optional steady-state
+    UV-vis spectrum to overlay on the spectral-slice plot.
+
+    Unlike PanelFileWidget, which holds a list of 1-D traces, a TA panel holds
+    exactly one 2-D map — every TA plot type draws one map per panel.
+    """
+
+    changed = pyqtSignal()
+
+    def __init__(self, index: int, parent=None):
+        super().__init__(parent)
+        self.index = index
+        self.dataset = None
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(s(4), s(8), s(4), s(8))
+        lay.setSpacing(s(10))
+
+        meta = QGroupBox('Sample')
+        meta_lay = QFormLayout(meta)
+        meta_lay.setContentsMargins(s(8), s(14), s(8), s(8))
+        meta_lay.setVerticalSpacing(s(8))
+        self.edit_name = QLineEdit()
+        self.edit_name.setPlaceholderText(f'Panel {index + 1}')
+        self.edit_name.editingFinished.connect(self._name_edited)
+        self.color = ColorButton(TA_SET_COLORS[index % len(TA_SET_COLORS)])
+        self.color.color_changed.connect(self._color_edited)
+        meta_lay.addRow('Name', self.edit_name)
+        meta_lay.addRow('Color', self.color)
+        lay.addWidget(meta)
+
+        self.dat_label, dat_row = self._file_row(
+            'TA map (.dat)', self._pick_dat, self._clear_dat)
+        lay.addLayout(dat_row)
+
+        self.uvvis_label, uv_row = self._file_row(
+            'UV-vis (optional)', self._pick_uvvis, self._clear_uvvis)
+        lay.addLayout(uv_row)
+
+        self.info_label = QLabel('No TA file loaded.')
+        self.info_label.setObjectName('hint')
+        self.info_label.setWordWrap(True)
+        lay.addWidget(self.info_label)
+
+        lay.addStretch(1)
+        self._refresh()
+
+    def _file_row(self, title: str, browse_handler, clear_handler):
+        row = QVBoxLayout()
+        row.setSpacing(s(6))
+        title_label = QLabel(title)
+        title_label.setObjectName('fieldlbl')
+        path_label = QLabel('None selected')
+        path_label.setObjectName('hint')
+        path_label.setMinimumWidth(s(120))
+        path_label.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                 QSizePolicy.Policy.Preferred)
+        btn_browse = QPushButton('Browse')
+        btn_browse.setObjectName('secondary')
+        btn_clear = QPushButton('X')
+        btn_clear.setObjectName('danger')
+        btn_clear.setFixedWidth(s(34))
+        btn_browse.clicked.connect(browse_handler)
+        btn_clear.clicked.connect(clear_handler)
+
+        file_row = QHBoxLayout()
+        file_row.setSpacing(s(6))
+        file_row.addWidget(title_label)
+        file_row.addWidget(path_label, 1)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(s(6))
+        action_row.addStretch(1)
+        action_row.addWidget(btn_browse)
+        action_row.addWidget(btn_clear)
+
+        row.addLayout(file_row)
+        row.addLayout(action_row)
+        return path_label, row
+
+    def _pick_dat(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, f'Panel {self.index + 1}: select TA map',
+            '', 'TA map files (*.dat);;All files (*.*)')
+        if not path:
+            return
+        self.dataset = make_ta_dataset(path)
+        self.edit_name.setText(self.dataset['display_name'])
+        self.color.set_hex(self.dataset['color'])
+        self._refresh()
+        self.changed.emit()
+
+    def _clear_dat(self):
+        self.dataset = None
+        self.edit_name.clear()
+        self._refresh()
+        self.changed.emit()
+
+    def _pick_uvvis(self):
+        if self.dataset is None:
+            QMessageBox.information(
+                self, 'Select a TA file first',
+                'Load the TA .dat map before attaching a UV-vis spectrum.')
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, f'Panel {self.index + 1}: select UV-vis spectrum',
+            '', 'Spectroscopy files (*.csv *.tsv *.xy);;All files (*.*)')
+        if not path:
+            return
+        self.dataset['uvvis_path'] = path
+        self._refresh()
+        self.changed.emit()
+
+    def _clear_uvvis(self):
+        if self.dataset is not None:
+            self.dataset['uvvis_path'] = ''
+        self._refresh()
+        self.changed.emit()
+
+    def _name_edited(self):
+        if self.dataset is not None:
+            self.dataset['display_name'] = self.edit_name.text().strip()
+            self.changed.emit()
+
+    def _color_edited(self, _hexcol):
+        if self.dataset is not None:
+            self.dataset['color'] = self.color.hex()
+            self.changed.emit()
+
+    def _refresh(self):
+        """Update the read-only labels from the current dataset.
+
+        The map is read through the shared cache, so reporting its dimensions
+        here costs nothing extra — the plot re-uses the same parsed object.
+        """
+        if self.dataset is None:
+            self.dat_label.setText('None selected')
+            self.uvvis_label.setText('None selected')
+            self.info_label.setText('No TA file loaded.')
+            return
+
+        self.dat_label.setText(os.path.basename(self.dataset['path']))
+        uv = self.dataset.get('uvvis_path') or ''
+        self.uvvis_label.setText(os.path.basename(uv) if uv else 'None selected')
+
+        m = load_ta_map(self.dataset['path'])
+        if m is None:
+            self.info_label.setText('Could not read this file as a TA map.')
+            return
+        self.info_label.setText(
+            f'{m.wavelength_nm.size} wavelengths '
+            f'({m.wavelength_nm.min():.0f}-{m.wavelength_nm.max():.0f} nm), '
+            f'{m.time_ps.size} delays '
+            f'({m.time_ps.min():.1f} to {m.time_ps.max():.0f} ps)')
+
+    def clear(self):
+        self.dataset = None
+        self.edit_name.blockSignals(True)
+        self.edit_name.clear()
+        self.edit_name.blockSignals(False)
+        self._refresh()
+
+    def get_state(self) -> dict:
+        return {'dataset': dict(self.dataset) if self.dataset else None,
+                'name': self.edit_name.text(),
+                'color': self.color.hex()}
+
+    def set_state(self, st: dict):
+        ds = st.get('dataset')
+        self.dataset = dict(ds) if ds else None
+        self.edit_name.blockSignals(True)
+        self.edit_name.setText(st.get('name', ''))
+        self.edit_name.blockSignals(False)
+        self.color.set_hex(st.get('color', self.color.hex()))
+        self._refresh()
+
+    def display_name(self) -> str:
+        return self.edit_name.text().strip() or f'Panel {self.index + 1}'
+
+    def settings(self):
+        """The record do_plot consumes; None when this panel has no map."""
+        if self.dataset is None:
+            return None
+        out = dict(self.dataset)
+        out['display_name'] = self.display_name()
+        out['color'] = self.color.hex()
+        return out
+
+
 def _labeled(label_text: str, widget: QWidget, lw: int = 90) -> QHBoxLayout:
     r = QHBoxLayout()
     r.setSpacing(s(8))
@@ -1219,6 +1476,7 @@ def _sep() -> QLabel:
 class ControlPanel(QScrollArea):
     plot_requested = pyqtSignal()
     live_update_requested = pyqtSignal()
+    ta_fit_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1238,6 +1496,9 @@ class ControlPanel(QScrollArea):
         lay.setSpacing(vs(6))
 
         self._current_mode = MODES[0]['key']
+        # Global-fit results, keyed by TA dataset uid. Cleared whenever a TA
+        # file changes so a stale fit can never be drawn over new data.
+        self.ta_fits: dict = {}
 
         # ── Plot panels
         self.g_plot = QGroupBox('Plot')
@@ -1302,6 +1563,29 @@ class ControlPanel(QScrollArea):
         iv_lay.addWidget(self.iv_tabs)
         self.g_iv.setVisible(False)
         lay.addWidget(self.g_iv)
+
+        # ── TA data (one 2-D map per panel)
+        self.g_ta = QGroupBox('TA Data')
+        ta_lay = QVBoxLayout(self.g_ta)
+        ta_lay.setContentsMargins(s(4), vs(14), s(4), vs(8))
+        ta_lay.setSpacing(vs(8))
+        ta_hint = QLabel('One transient-absorption .dat map per panel. '
+                         'Attach a UV-vis CSV to overlay it on spectral slices.')
+        ta_hint.setObjectName('hint')
+        ta_hint.setWordWrap(True)
+        ta_lay.addWidget(ta_hint)
+        self.ta_tabs = QTabWidget()
+        self.ta_widgets: list[TADataSetWidget] = []
+        for i in range(5):
+            widget = TADataSetWidget(i)
+            widget.changed.connect(self._on_ta_data_changed)
+            self.ta_widgets.append(widget)
+            self.ta_tabs.addTab(widget, f'P{i + 1}')
+            if i > 0:
+                self.ta_tabs.setTabVisible(i, False)
+        ta_lay.addWidget(self.ta_tabs)
+        self.g_ta.setVisible(False)
+        lay.addWidget(self.g_ta)
 
         # ── Axes
         self.g_axes = QGroupBox('Axes')
@@ -1792,6 +2076,316 @@ class ControlPanel(QScrollArea):
         self.g_xrd.setVisible(False)
         lay.addWidget(self.g_xrd)
 
+        # ── TA options
+        # A TA map can be looked at along either axis, so the plot type is a
+        # choice here rather than a separate mode: Map shows ΔA(λ, t) whole,
+        # Slices fixes time and scans wavelength (manuscript panels a/b),
+        # Kinetics fixes wavelength and scans time (panel d), and Global fit
+        # spectra shows the amplitude of each fitted component vs wavelength.
+        self.g_ta_opts = QGroupBox('TA Options')
+        tgl = QVBoxLayout(self.g_ta_opts)
+        tgl.setSpacing(vs(9))
+
+        self.combo_ta_plot = NoScrollComboBox()
+        self.combo_ta_plot.addItems(
+            ['Map', 'Spectral slices', 'Kinetics', 'Global fit spectra'])
+        self.combo_ta_plot.currentIndexChanged.connect(self._toggle_ta_sections)
+        tgl.addLayout(_labeled('TA plot', self.combo_ta_plot))
+
+        # Probe-window trim. The detector records well outside the usable probe
+        # range (these files start at 347 nm, below the 380 nm long-pass), and
+        # those edge channels are pure noise spiking to tens of mOD — they wreck
+        # both the Y autoscale on slices and the colour scale on the map. The
+        # notebook did the same thing by hand with x[x < 530].
+        self.chk_ta_trim = QCheckBox('Trim to probe window')
+        self.chk_ta_trim.setChecked(True)
+        self.chk_ta_trim.toggled.connect(self._toggle_ta_trim)
+        tgl.addWidget(self.chk_ta_trim)
+        trimrow = QHBoxLayout()
+        trimrow.setSpacing(s(5))
+        trl = QLabel('Probe (nm)')
+        trl.setFixedWidth(s(66))
+        trl.setObjectName('fieldlbl')
+        self.spin_ta_trim_lo = FlatDoubleSpinBox()
+        self.spin_ta_trim_hi = FlatDoubleSpinBox()
+        for sb in (self.spin_ta_trim_lo, self.spin_ta_trim_hi):
+            sb.setRange(0.0, 10000.0)
+            sb.setDecimals(1)
+            sb.setMinimumWidth(s(56))
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.spin_ta_trim_lo.setValue(400.0)
+        self.spin_ta_trim_hi.setValue(530.0)
+        tdash = QLabel('–')
+        tdash.setStyleSheet('color:#8a93a0;')
+        tdash.setFixedWidth(s(12))
+        tdash.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        trimrow.addWidget(trl)
+        trimrow.addWidget(self.spin_ta_trim_lo, 1)
+        trimrow.addWidget(tdash)
+        trimrow.addWidget(self.spin_ta_trim_hi, 1)
+        tgl.addLayout(trimrow)
+
+        # ── Map
+        self.ta_map_rows: list[QWidget] = []
+        self.combo_ta_cmap = NoScrollComboBox()
+        self.combo_ta_cmap.addItems(
+            ['Spectral', 'RdBu_r', 'coolwarm', 'seismic', 'viridis', 'magma'])
+        self.combo_ta_scale = NoScrollComboBox()
+        self.combo_ta_scale.addItems(['Linear', 'Symlog', 'Log'])
+        self.combo_ta_scale.setCurrentText('Symlog')
+        self.spin_ta_linthresh = FlatDoubleSpinBox()
+        self.spin_ta_linthresh.setRange(0.01, 1000.0)
+        self.spin_ta_linthresh.setDecimals(2)
+        self.spin_ta_linthresh.setValue(5.0)
+        self.spin_ta_clip = FlatDoubleSpinBox()
+        self.spin_ta_clip.setRange(50.0, 100.0)
+        self.spin_ta_clip.setDecimals(1)
+        self.spin_ta_clip.setValue(98.0)
+        for label_text, widget in (
+            ('Colormap', self.combo_ta_cmap),
+            ('Time axis', self.combo_ta_scale),
+            ('Linthresh', self.spin_ta_linthresh),
+            ('Color pct', self.spin_ta_clip),
+        ):
+            row = QWidget()
+            row.setLayout(_labeled(label_text, widget))
+            self.ta_map_rows.append(row)
+            tgl.addWidget(row)
+        self.chk_ta_colorbar = QCheckBox('Show colorbar')
+        self.chk_ta_colorbar.setChecked(True)
+        self.ta_map_rows.append(self.chk_ta_colorbar)
+        tgl.addWidget(self.chk_ta_colorbar)
+        _clip_hint = QLabel('Color limits are symmetric about zero at this\n'
+                            'percentile of |ΔA|, so outliers do not wash out\n'
+                            'the map.')
+        _clip_hint.setObjectName('fieldlbl')
+        self.ta_map_rows.append(_clip_hint)
+        tgl.addWidget(_clip_hint)
+
+        # ── Spectral slices
+        self.ta_slice_rows: list[QWidget] = []
+        self._ta_sep_slices = _sep()
+        self.ta_slice_rows.append(self._ta_sep_slices)
+        tgl.addWidget(self._ta_sep_slices)
+        slice_lbl = QLabel('Delay windows (ps) averaged into each slice:')
+        slice_lbl.setObjectName('fieldlbl')
+        self.ta_slice_rows.append(slice_lbl)
+        tgl.addWidget(slice_lbl)
+        self.ta_window_list = QListWidget()
+        self.ta_window_list.setMaximumHeight(s(92))
+        self.ta_windows: list[tuple] = [tuple(w) for w in ta_data.DEFAULT_TIME_WINDOWS_PS]
+        self.ta_window_list.itemDoubleClicked.connect(
+            lambda item: self.edit_ta_window(self.ta_window_list.row(item)))
+        self.ta_slice_rows.append(self.ta_window_list)
+        tgl.addWidget(self.ta_window_list)
+        win_row = QHBoxLayout()
+        win_row.setSpacing(s(6))
+        self.btn_ta_win_add = QPushButton('+ Add')
+        self.btn_ta_win_add.setObjectName('secondary')
+        self.btn_ta_win_rem = QPushButton('Remove')
+        self.btn_ta_win_rem.setObjectName('danger')
+        self.btn_ta_win_reset = QPushButton('Reset')
+        self.btn_ta_win_reset.setObjectName('secondary')
+        self.btn_ta_win_add.clicked.connect(self._ta_add_window)
+        self.btn_ta_win_rem.clicked.connect(self._ta_remove_window)
+        self.btn_ta_win_reset.clicked.connect(self._ta_reset_windows)
+        win_row.addWidget(self.btn_ta_win_add, 2)
+        win_row.addWidget(self.btn_ta_win_rem, 2)
+        win_row.addWidget(self.btn_ta_win_reset, 2)
+        win_widget = QWidget()
+        win_widget.setLayout(win_row)
+        self.ta_slice_rows.append(win_widget)
+        tgl.addWidget(win_widget)
+        self.chk_ta_zero_line = QCheckBox('Zero line')
+        self.chk_ta_zero_line.setChecked(True)
+        self.ta_slice_rows.append(self.chk_ta_zero_line)
+        tgl.addWidget(self.chk_ta_zero_line)
+        self.chk_ta_uvvis = QCheckBox('Overlay UV-vis (right axis)')
+        self.chk_ta_uvvis.setChecked(True)
+        self.ta_slice_rows.append(self.chk_ta_uvvis)
+        tgl.addWidget(self.chk_ta_uvvis)
+        self.chk_ta_uv_auto = QCheckBox('Auto UV-vis range')
+        self.chk_ta_uv_auto.setChecked(True)
+        self.chk_ta_uv_auto.toggled.connect(self._toggle_ta_uv_range)
+        self.ta_slice_rows.append(self.chk_ta_uv_auto)
+        tgl.addWidget(self.chk_ta_uv_auto)
+        uvrow = QHBoxLayout()
+        uvrow.setSpacing(s(5))
+        uvl = QLabel('UV-vis Y')
+        uvl.setFixedWidth(s(66))
+        uvl.setObjectName('fieldlbl')
+        self.spin_ta_uv_min = FlatDoubleSpinBox()
+        self.spin_ta_uv_max = FlatDoubleSpinBox()
+        for sb in (self.spin_ta_uv_min, self.spin_ta_uv_max):
+            sb.setRange(-1000.0, 1000.0)
+            sb.setDecimals(2)
+            sb.setMinimumWidth(s(56))
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.spin_ta_uv_min.setValue(-0.75)
+        self.spin_ta_uv_max.setValue(0.75)
+        uv_dash = QLabel('–')
+        uv_dash.setStyleSheet('color:#8a93a0;')
+        uv_dash.setFixedWidth(s(12))
+        uv_dash.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        uvrow.addWidget(uvl)
+        uvrow.addWidget(self.spin_ta_uv_min, 1)
+        uvrow.addWidget(uv_dash)
+        uvrow.addWidget(self.spin_ta_uv_max, 1)
+        uv_widget = QWidget()
+        uv_widget.setLayout(uvrow)
+        self.ta_slice_rows.append(uv_widget)
+        tgl.addWidget(uv_widget)
+
+        # ── Kinetics
+        self.ta_kin_rows: list[QWidget] = []
+        self._ta_sep_kin = _sep()
+        self.ta_kin_rows.append(self._ta_sep_kin)
+        tgl.addWidget(self._ta_sep_kin)
+        self.spin_ta_high_lo = FlatDoubleSpinBox()
+        self.spin_ta_high_hi = FlatDoubleSpinBox()
+        self.spin_ta_low_lo = FlatDoubleSpinBox()
+        self.spin_ta_low_hi = FlatDoubleSpinBox()
+        for sb in (self.spin_ta_high_lo, self.spin_ta_high_hi,
+                   self.spin_ta_low_lo, self.spin_ta_low_hi):
+            sb.setRange(0.0, 10000.0)
+            sb.setDecimals(1)
+        self.spin_ta_high_lo.setValue(ta_data.HIGH_BAND_NM[0])
+        self.spin_ta_high_hi.setValue(ta_data.HIGH_BAND_NM[1])
+        self.spin_ta_low_lo.setValue(ta_data.LOW_BAND_NM[0])
+        self.spin_ta_low_hi.setValue(ta_data.LOW_BAND_NM[1])
+        for label_text, lo_sb, hi_sb in (
+            ('High band', self.spin_ta_high_lo, self.spin_ta_high_hi),
+            ('Low band', self.spin_ta_low_lo, self.spin_ta_low_hi),
+        ):
+            band_row = QHBoxLayout()
+            band_row.setSpacing(s(5))
+            bl = QLabel(label_text)
+            bl.setFixedWidth(s(66))
+            bl.setObjectName('fieldlbl')
+            bdash = QLabel('–')
+            bdash.setStyleSheet('color:#8a93a0;')
+            bdash.setFixedWidth(s(12))
+            bdash.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            for sb in (lo_sb, hi_sb):
+                sb.setMinimumWidth(s(56))
+                sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            band_row.addWidget(bl)
+            band_row.addWidget(lo_sb, 1)
+            band_row.addWidget(bdash)
+            band_row.addWidget(hi_sb, 1)
+            band_widget = QWidget()
+            band_widget.setLayout(band_row)
+            self.ta_kin_rows.append(band_widget)
+            tgl.addWidget(band_widget)
+        _band_hint = QLabel('Probe bands in nm: the higher-bandgap quasi-2D\n'
+                            'phase and the lower-bandgap bulk phase.')
+        _band_hint.setObjectName('fieldlbl')
+        self.ta_kin_rows.append(_band_hint)
+        tgl.addWidget(_band_hint)
+        self.edit_ta_high_label = QLineEdit('High-bandgap phase')
+        self.edit_ta_low_label = QLineEdit('MAPbBr$_3$')
+        for label_text, widget in (('High label', self.edit_ta_high_label),
+                                   ('Low label', self.edit_ta_low_label)):
+            row = QWidget()
+            row.setLayout(_labeled(label_text, widget))
+            self.ta_kin_rows.append(row)
+            tgl.addWidget(row)
+        self.chk_ta_normalize = QCheckBox('Normalize to late-time window')
+        self.chk_ta_normalize.setChecked(True)
+        self.ta_kin_rows.append(self.chk_ta_normalize)
+        tgl.addWidget(self.chk_ta_normalize)
+        normrow = QHBoxLayout()
+        normrow.setSpacing(s(5))
+        nl = QLabel('Norm (ps)')
+        nl.setFixedWidth(s(66))
+        nl.setObjectName('fieldlbl')
+        self.spin_ta_norm_lo = FlatDoubleSpinBox()
+        self.spin_ta_norm_hi = FlatDoubleSpinBox()
+        for sb in (self.spin_ta_norm_lo, self.spin_ta_norm_hi):
+            sb.setRange(-1000.0, 1000000.0)
+            sb.setDecimals(1)
+            sb.setMinimumWidth(s(56))
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.spin_ta_norm_lo.setValue(ta_data.NORM_WINDOW_PS[0])
+        self.spin_ta_norm_hi.setValue(ta_data.NORM_WINDOW_PS[1])
+        ndash = QLabel('–')
+        ndash.setStyleSheet('color:#8a93a0;')
+        ndash.setFixedWidth(s(12))
+        ndash.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        normrow.addWidget(nl)
+        normrow.addWidget(self.spin_ta_norm_lo, 1)
+        normrow.addWidget(ndash)
+        normrow.addWidget(self.spin_ta_norm_hi, 1)
+        norm_widget = QWidget()
+        norm_widget.setLayout(normrow)
+        self.ta_kin_rows.append(norm_widget)
+        tgl.addWidget(norm_widget)
+
+        # ── Global fit
+        tgl.addWidget(_sep())
+        fit_lbl = QLabel('Global fit')
+        fit_lbl.setObjectName('fieldlbl')
+        tgl.addWidget(fit_lbl)
+        fitrow = QHBoxLayout()
+        fitrow.setSpacing(s(5))
+        fl = QLabel('Fit (ps)')
+        fl.setFixedWidth(s(66))
+        fl.setObjectName('fieldlbl')
+        self.spin_ta_fit_lo = FlatDoubleSpinBox()
+        self.spin_ta_fit_hi = FlatDoubleSpinBox()
+        for sb in (self.spin_ta_fit_lo, self.spin_ta_fit_hi):
+            sb.setRange(-1000.0, 1000000.0)
+            sb.setDecimals(2)
+            sb.setMinimumWidth(s(56))
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.spin_ta_fit_lo.setValue(ta_data.FIT_TIME_RANGE_PS[0])
+        self.spin_ta_fit_hi.setValue(ta_data.FIT_TIME_RANGE_PS[1])
+        fdash = QLabel('–')
+        fdash.setStyleSheet('color:#8a93a0;')
+        fdash.setFixedWidth(s(12))
+        fdash.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fitrow.addWidget(fl)
+        fitrow.addWidget(self.spin_ta_fit_lo, 1)
+        fitrow.addWidget(fdash)
+        fitrow.addWidget(self.spin_ta_fit_hi, 1)
+        tgl.addLayout(fitrow)
+
+        self.spin_ta_tau_long = FlatDoubleSpinBox()
+        self.spin_ta_tau_long.setRange(1.0, 1000000.0)
+        self.spin_ta_tau_long.setDecimals(1)
+        self.spin_ta_tau_long.setValue(ta_data.DEFAULT_TAU_LONG_PS)
+        tgl.addLayout(_labeled('τ₃ (ps)', self.spin_ta_tau_long))
+        self.chk_ta_fit_tau_long = QCheckBox('Fit τ₃ instead of fixing it')
+        tgl.addWidget(self.chk_ta_fit_tau_long)
+        _tau_hint = QLabel('The collaborator notebook fixes τ₃ at 3500 ps while\n'
+                           'still listing it as a fit parameter, so it never\n'
+                           'actually varied. Here the choice is explicit.')
+        _tau_hint.setObjectName('fieldlbl')
+        tgl.addWidget(_tau_hint)
+
+        self.btn_ta_fit = QPushButton('Run global fit')
+        self.btn_ta_fit.setObjectName('secondary')
+        self.btn_ta_fit.clicked.connect(self.ta_fit_requested)
+        tgl.addWidget(self.btn_ta_fit)
+        self.lbl_ta_fit = QLabel('No fit yet.')
+        self.lbl_ta_fit.setObjectName('hint')
+        self.lbl_ta_fit.setWordWrap(True)
+        tgl.addWidget(self.lbl_ta_fit)
+
+        self.chk_ta_fit_overlay = QCheckBox('Overlay fit on kinetics')
+        self.chk_ta_fit_overlay.setChecked(True)
+        tgl.addWidget(self.chk_ta_fit_overlay)
+        self.chk_ta_fit_annotate = QCheckBox('Annotate τ on plot')
+        self.chk_ta_fit_annotate.setChecked(True)
+        tgl.addWidget(self.chk_ta_fit_annotate)
+
+        self.g_ta_opts.setVisible(False)
+        lay.addWidget(self.g_ta_opts)
+        self._refresh_ta_window_list()
+        self._toggle_ta_sections()
+        self._toggle_ta_trim(self.chk_ta_trim.isChecked())
+        self._toggle_ta_uv_range(self.chk_ta_uv_auto.isChecked())
+
         # ── Export
         g6 = QGroupBox('Export')
         egl = QVBoxLayout(g6)
@@ -1833,13 +2427,18 @@ class ControlPanel(QScrollArea):
     def set_mode(self, key: str):
         self._current_mode = key
         is_iv = key == 'iv'
+        is_ta = key == 'ta'
+        # TA keeps the panel count and axes controls but swaps the 1-D trace
+        # box for its own map box; smoothing applies to traces, not to a map.
         self.g_plot.setVisible(not is_iv)
-        self.g_data.setVisible(not is_iv)
+        self.g_data.setVisible(not is_iv and not is_ta)
         self.g_axes.setVisible(not is_iv)
         self.g_iv.setVisible(is_iv)
-        self.g_smooth.setVisible(not is_iv)
+        self.g_smooth.setVisible(not is_iv and not is_ta)
         self.g_pl.setVisible(key == 'pl')
         self.g_xrd.setVisible(key == 'xrd')
+        self.g_ta.setVisible(is_ta)
+        self.g_ta_opts.setVisible(is_ta)
 
     def current_mode(self) -> str:
         return self._current_mode
@@ -1847,10 +2446,79 @@ class ControlPanel(QScrollArea):
     def _on_panels_change(self, n: int):
         for i in range(5):
             self.panel_tabs.setTabVisible(i, i < n)
+            self.ta_tabs.setTabVisible(i, i < n)
 
     def _on_iv_sets_change(self, n: int):
         for i in range(10):
             self.iv_tabs.setTabVisible(i, i < n)
+
+    # ── TA slots ───────────────────────────────────────────────────────────────
+
+    def _on_ta_data_changed(self):
+        """A panel's map or UV-vis file changed, so any cached fit is stale."""
+        self.ta_fits = {}
+        self.lbl_ta_fit.setText('No fit yet.')
+        self.live_update_requested.emit()
+
+    def ta_plot_kind(self) -> str:
+        return {
+            'Map': 'map',
+            'Spectral slices': 'slices',
+            'Kinetics': 'kinetics',
+            'Global fit spectra': 'sas',
+        }.get(self.combo_ta_plot.currentText(), 'map')
+
+    def _toggle_ta_sections(self, *_):
+        """Show only the options that apply to the selected TA plot type."""
+        kind = self.ta_plot_kind()
+        for w in self.ta_map_rows:
+            w.setVisible(kind == 'map')
+        for w in self.ta_slice_rows:
+            w.setVisible(kind == 'slices')
+        for w in self.ta_kin_rows:
+            w.setVisible(kind == 'kinetics')
+
+    def _toggle_ta_trim(self, on: bool):
+        self.spin_ta_trim_lo.setEnabled(on)
+        self.spin_ta_trim_hi.setEnabled(on)
+
+    def _toggle_ta_uv_range(self, auto: bool):
+        self.spin_ta_uv_min.setEnabled(not auto)
+        self.spin_ta_uv_max.setEnabled(not auto)
+
+    def _refresh_ta_window_list(self):
+        self.ta_window_list.clear()
+        for t0, t1, label in self.ta_windows:
+            self.ta_window_list.addItem(f'{label}   [{t0:g}, {t1:g}]')
+
+    def _ta_add_window(self):
+        dlg = TAWindowDialog(0.0, 1.0, 'new', self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.ta_windows.append(dlg.values())
+            self._refresh_ta_window_list()
+            self.live_update_requested.emit()
+
+    def _ta_remove_window(self):
+        row = self.ta_window_list.currentRow()
+        if 0 <= row < len(self.ta_windows):
+            self.ta_windows.pop(row)
+            self._refresh_ta_window_list()
+            self.live_update_requested.emit()
+
+    def _ta_reset_windows(self):
+        self.ta_windows = [tuple(w) for w in ta_data.DEFAULT_TIME_WINDOWS_PS]
+        self._refresh_ta_window_list()
+        self.live_update_requested.emit()
+
+    def edit_ta_window(self, idx: int):
+        if not (0 <= idx < len(self.ta_windows)):
+            return
+        t0, t1, label = self.ta_windows[idx]
+        dlg = TAWindowDialog(t0, t1, label, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.ta_windows[idx] = dlg.values()
+            self._refresh_ta_window_list()
+            self.live_update_requested.emit()
 
     def _toggle_xlim(self):
         enabled = not self.chk_auto_x.isChecked() and not self.chk_separate_x.isChecked()
@@ -2037,6 +2705,10 @@ class ControlPanel(QScrollArea):
             pw.clear()
         for iv in self.iv_widgets:
             iv.clear()
+        for tw in self.ta_widgets:
+            tw.clear()
+        self.ta_fits = {}
+        self.lbl_ta_fit.setText('No fit yet.')
         self.xrd_ref_paths.clear()
         self.xrd_ref_colors.clear()
         self.xrd_ref_labels.clear()
@@ -2055,6 +2727,9 @@ class ControlPanel(QScrollArea):
             'panels': [pw.get_state() for pw in self.panel_widgets],
             'n_iv': self.spin_iv_sets.value(),
             'iv': [iv.get_state() for iv in self.iv_widgets],
+            'ta': [tw.get_state() for tw in self.ta_widgets],
+            'ta_windows': [tuple(w) for w in self.ta_windows],
+            'ta_fits': dict(self.ta_fits),
             'xrd_refs': list(self.xrd_ref_paths),
             'xrd_ref_colors': list(self.xrd_ref_colors),
             'xrd_ref_labels': list(self.xrd_ref_labels),
@@ -2113,6 +2788,14 @@ class ControlPanel(QScrollArea):
         self._on_iv_sets_change(self.spin_iv_sets.value())
         for iv, st in zip(self.iv_widgets, snap.get('iv', [])):
             iv.set_state(st)
+        for tw, st in zip(self.ta_widgets, snap.get('ta', [])):
+            tw.set_state(st)
+        self.ta_windows = [tuple(w) for w in
+                           snap.get('ta_windows', ta_data.DEFAULT_TIME_WINDOWS_PS)]
+        self._refresh_ta_window_list()
+        self.ta_fits = dict(snap.get('ta_fits', {}))
+        self.lbl_ta_fit.setText(
+            'Fitted (restored).' if self.ta_fits else 'No fit yet.')
         self.xrd_ref_paths = list(snap.get('xrd_refs', []))
         self.xrd_ref_colors = list(snap.get('xrd_ref_colors', []))
         self.xrd_ref_labels = list(snap.get('xrd_ref_labels', []))
@@ -2183,6 +2866,7 @@ class ControlPanel(QScrollArea):
             self.iv_widgets[i].settings()
             for i in range(self.spin_iv_sets.value())
         ]
+        ta_datasets = [self.ta_widgets[i].settings() for i in range(n)]
         raw = self.edit_panel_titles.text()
         panel_titles = [t.strip() for t in raw.split(',') if t.strip()]
         while len(panel_titles) < 5:
@@ -2251,6 +2935,36 @@ class ControlPanel(QScrollArea):
             'xrd_ref_labels': list(self.xrd_ref_labels),
             'xrd_ref_widths': list(self.xrd_ref_widths),
             'xrd_ref_styles': list(self.xrd_ref_styles),
+            # Transient absorption
+            'ta_datasets': ta_datasets,
+            'ta_plot_kind': self.ta_plot_kind(),
+            'ta_trim': self.chk_ta_trim.isChecked(),
+            'ta_trim_range': (self.spin_ta_trim_lo.value(), self.spin_ta_trim_hi.value()),
+            'ta_cmap': self.combo_ta_cmap.currentText(),
+            'ta_time_scale': self.combo_ta_scale.currentText(),
+            'ta_linthresh': self.spin_ta_linthresh.value(),
+            'ta_color_pct': self.spin_ta_clip.value(),
+            'ta_colorbar': self.chk_ta_colorbar.isChecked(),
+            'ta_windows': [tuple(w) for w in self.ta_windows],
+            'ta_zero_line': self.chk_ta_zero_line.isChecked(),
+            'ta_uvvis_overlay': self.chk_ta_uvvis.isChecked(),
+            'ta_uvvis_auto': self.chk_ta_uv_auto.isChecked(),
+            'ta_uvvis_min': self.spin_ta_uv_min.value(),
+            'ta_uvvis_max': self.spin_ta_uv_max.value(),
+            'ta_high_band': (self.spin_ta_high_lo.value(), self.spin_ta_high_hi.value()),
+            'ta_low_band': (self.spin_ta_low_lo.value(), self.spin_ta_low_hi.value()),
+            'ta_high_label': self.edit_ta_high_label.text().strip(),
+            'ta_low_label': self.edit_ta_low_label.text().strip(),
+            'ta_normalize': self.chk_ta_normalize.isChecked(),
+            'ta_norm_window': (self.spin_ta_norm_lo.value(), self.spin_ta_norm_hi.value()),
+            'ta_fit_range': (self.spin_ta_fit_lo.value(), self.spin_ta_fit_hi.value()),
+            'ta_tau_long': self.spin_ta_tau_long.value(),
+            'ta_fit_tau_long': self.chk_ta_fit_tau_long.isChecked(),
+            'ta_fit_overlay': self.chk_ta_fit_overlay.isChecked(),
+            'ta_fit_annotate': self.chk_ta_fit_annotate.isChecked(),
+            # Fits are computed on demand by the Run global fit button and
+            # cached per dataset uid, so replotting never silently refits.
+            'ta_fits': self.ta_fits,
             # Graph appearance — font
             'font_family': self.combo_font.currentText(),
             # Ticks
@@ -2302,6 +3016,13 @@ class ControlPanel(QScrollArea):
         'xrd_d_spacing', 'xrd_lambda', 'xrd_ref_step', 'xrd_exp_step',
         'xrd_margin_labels', 'xrd_margin_label_gap', 'xrd_normalize',
         'xrd_divisor', 'xrd_log_exp',
+        # TA style/analysis choices. Dataset paths are deliberately excluded so
+        # presets stay portable between machines, same as the other modes.
+        'ta_plot_kind', 'ta_trim', 'ta_cmap', 'ta_time_scale', 'ta_linthresh',
+        'ta_color_pct', 'ta_colorbar', 'ta_zero_line', 'ta_uvvis_overlay',
+        'ta_uvvis_auto', 'ta_uvvis_min', 'ta_uvvis_max',
+        'ta_high_label', 'ta_low_label', 'ta_normalize',
+        'ta_tau_long', 'ta_fit_tau_long', 'ta_fit_overlay', 'ta_fit_annotate',
     }
 
     def _style_preset(self) -> dict:
@@ -2339,6 +3060,11 @@ class ControlPanel(QScrollArea):
         if 'xrd_margin_label_gap'   in p: _set(self.spin_xrd_label_gap, p['xrd_margin_label_gap'])
         if 'xrd_divisor'            in p: _set(self.spin_xrd_divisor, p['xrd_divisor'])
         if 'sci_exp'                in p: _set(self.spin_sci_exp, p['sci_exp'])
+        if 'ta_linthresh'           in p: _set(self.spin_ta_linthresh, p['ta_linthresh'])
+        if 'ta_color_pct'           in p: _set(self.spin_ta_clip, p['ta_color_pct'])
+        if 'ta_uvvis_min'           in p: _set(self.spin_ta_uv_min, p['ta_uvvis_min'])
+        if 'ta_uvvis_max'           in p: _set(self.spin_ta_uv_max, p['ta_uvvis_max'])
+        if 'ta_tau_long'            in p: _set(self.spin_ta_tau_long, p['ta_tau_long'])
         # Checkboxes
         for attr, key in [
             (self.chk_xticks,              'show_xticks'),
@@ -2362,6 +3088,15 @@ class ControlPanel(QScrollArea):
             (self.chk_xrd_log,             'xrd_log_exp'),
             (self.chk_xrd_margin_labels,   'xrd_margin_labels'),
             (self.chk_force_sci,           'force_sci'),
+            (self.chk_ta_trim,             'ta_trim'),
+            (self.chk_ta_colorbar,         'ta_colorbar'),
+            (self.chk_ta_zero_line,        'ta_zero_line'),
+            (self.chk_ta_uvvis,            'ta_uvvis_overlay'),
+            (self.chk_ta_uv_auto,          'ta_uvvis_auto'),
+            (self.chk_ta_normalize,        'ta_normalize'),
+            (self.chk_ta_fit_tau_long,     'ta_fit_tau_long'),
+            (self.chk_ta_fit_overlay,      'ta_fit_overlay'),
+            (self.chk_ta_fit_annotate,     'ta_fit_annotate'),
         ]:
             if key in p:
                 attr.blockSignals(True)
@@ -2373,6 +3108,17 @@ class ControlPanel(QScrollArea):
         if 'legend_loc'    in p: self.combo_legend_loc.setCurrentText(p['legend_loc'])
         if 'legend_alignment' in p: self.combo_legend_align.setCurrentText(p['legend_alignment'])
         if 'font_family'   in p: self.combo_font.setCurrentText(p['font_family'])
+        if 'ta_cmap'       in p: self.combo_ta_cmap.setCurrentText(p['ta_cmap'])
+        if 'ta_time_scale' in p: self.combo_ta_scale.setCurrentText(p['ta_time_scale'])
+        if 'ta_plot_kind'  in p:
+            reverse = {'map': 'Map', 'slices': 'Spectral slices',
+                       'kinetics': 'Kinetics', 'sas': 'Global fit spectra'}
+            self.combo_ta_plot.setCurrentText(reverse.get(p['ta_plot_kind'], 'Map'))
+        if 'ta_high_label' in p: self.edit_ta_high_label.setText(p['ta_high_label'])
+        if 'ta_low_label'  in p: self.edit_ta_low_label.setText(p['ta_low_label'])
+        self._toggle_ta_sections()
+        self._toggle_ta_trim(self.chk_ta_trim.isChecked())
+        self._toggle_ta_uv_range(self.chk_ta_uv_auto.isChecked())
         # Color buttons
         if 'box_color'         in p: self.color_box.set_hex(p['box_color'])
         if 'legend_bg_color'   in p: self.color_legend_bg.set_hex(p['legend_bg_color'])
@@ -3759,6 +4505,299 @@ def _plot_xrd(axes: list, s: dict) -> int:
 
 # ── Main plot dispatcher ──────────────────────────────────────────────────────
 
+# ── Transient absorption plotting ─────────────────────────────────────────────
+
+def _viridis_colors(n: int):
+    """n evenly spaced viridis colours — the notebook's slice/trace palette.
+
+    The app deliberately never imports pyplot (figures are built directly), so
+    the colormap is taken from the registry rather than plt.cm.
+    """
+    cmap = matplotlib.colormaps['viridis']
+    if n <= 1:
+        return [cmap(0.0)]
+    return [cmap(v) for v in np.linspace(0.0, 0.9, n)]
+
+
+TA_XLABEL_WAVELENGTH = 'Wavelength λ (nm)'
+TA_XLABEL_DELAY = 'Pump-probe delay (ps)'
+TA_YLABEL_DELTA_A = r'$\Delta A$ (mOD)'
+
+
+def _ta_apply_time_scale(ax, s: dict, t_min=None, t_max=None):
+    """Delay axes are usually viewed logarithmically — the interesting physics
+    spans sub-ps to ns. Symlog keeps negative delays visible; plain log does not.
+    """
+    scale = s.get('ta_time_scale', 'Symlog')
+    if scale == 'Symlog':
+        linthresh = max(1e-6, s.get('ta_linthresh', 5.0))
+        ax.set_xscale('symlog', linthresh=linthresh)
+        _ta_symlog_ticks(ax, linthresh, t_min, t_max)
+    elif scale == 'Log':
+        ax.set_xscale('log')
+
+
+def _ta_symlog_ticks(ax, linthresh: float, t_min, t_max):
+    """Apply the shared decade-tick positions to a symlog delay axis."""
+    if t_min is None or t_max is None:
+        return
+    ticks = ta_data.symlog_ticks(linthresh, t_min, t_max)
+    if ticks:
+        ax.set_xticks(ticks)
+
+
+def _ta_load(ds: dict):
+    return load_ta_map(ds['path']) if ds and ds.get('path') else None
+
+
+def _ta_trim_mask(wavelength, s: dict):
+    """Boolean mask of the usable probe window.
+
+    Channels outside it are detector edge noise, not signal, and letting them
+    through ruins the Y autoscale on slices and the colour scale on the map.
+    """
+    if not s.get('ta_trim', True):
+        return np.ones(np.shape(wavelength), dtype=bool)
+    lo, hi = sorted(s.get('ta_trim_range', (400.0, 530.0)))
+    mask = (wavelength >= lo) & (wavelength <= hi)
+    # Never trim everything away — an over-narrow window should show the whole
+    # spectrum rather than an empty panel.
+    return mask if mask.sum() >= 2 else np.ones(np.shape(wavelength), dtype=bool)
+
+
+def _ta_symmetric_limit(z, percentile: float) -> float:
+    """Colour limit symmetric about zero, so positive (excited-state absorption)
+    and negative (bleach) features are directly comparable."""
+    finite = np.abs(z[np.isfinite(z)])
+    if not finite.size:
+        return 1.0
+    limit = float(np.percentile(finite, min(100.0, max(50.0, percentile))))
+    return limit if np.isfinite(limit) and limit > 0 else 1.0
+
+
+def _plot_ta_map(fig, ax, ds: dict, s: dict, is_left: bool, idx: int):
+    m = _ta_load(ds)
+    if m is None:
+        return 1
+    keep = _ta_trim_mask(m.wavelength_nm, s)
+    wave = m.wavelength_nm[keep]
+    z = m.delta_a_mod[keep, :]
+    limit = _ta_symmetric_limit(z, s.get('ta_color_pct', 98.0))
+    mesh = ax.pcolormesh(
+        m.time_ps, wave, z,
+        shading='auto', cmap=s.get('ta_cmap', 'Spectral'),
+        vmin=-limit, vmax=limit,
+    )
+    if s.get('ta_colorbar', True):
+        bar = fig.colorbar(mesh, ax=ax)
+        bar.set_label(TA_YLABEL_DELTA_A, fontsize=s['fontsize'])
+        bar.ax.tick_params(labelsize=s['fontsize'])
+    _style_ax(ax, is_left, TA_XLABEL_DELAY, TA_XLABEL_WAVELENGTH, s)
+    _ta_apply_time_scale(ax, s, m.time_ps.min(), m.time_ps.max())
+    _panel_title(ax, idx, s)
+    return 0
+
+
+def _plot_ta_slices(ax, ds: dict, s: dict, is_left: bool, idx: int):
+    """Manuscript panels a/b: fix the delay, scan wavelength.
+
+    Each curve is ΔA averaged over a short delay window, coloured along viridis
+    from earliest to latest, with the steady-state UV-vis spectrum optionally
+    drawn on a twin right axis so a transient bleach can be lined up against
+    the ground-state absorption feature it comes from.
+    """
+    m = _ta_load(ds)
+    if m is None:
+        return 1
+
+    windows = s.get('ta_windows') or ta_data.DEFAULT_TIME_WINDOWS_PS
+    colors = _viridis_colors(len(windows))
+    handles, labels, sources = [], [], []
+    for k, window in enumerate(windows):
+        t0, t1, label = window[0], window[1], window[2]
+        x, y = ta_data.spectrum_at(m, t0, t1)
+        keep = _ta_trim_mask(x, s)
+        line, = ax.plot(x[keep], y[keep], color=colors[k], linewidth=s['linewidth'])
+        handles.append(line)
+        labels.append(label)
+        sources.append(('ta_window', k))
+
+    if s.get('ta_zero_line', True):
+        ax.axhline(0.0, linewidth=0.8, color='black', zorder=0)
+
+    if s.get('ta_uvvis_overlay', True) and ds.get('uvvis_path'):
+        uv_x, uv_y = load_file(ds['uvvis_path'])
+        if uv_x is not None:
+            twin = ax.twinx()
+            twin.plot(uv_x, uv_y, color='black', linewidth=s['linewidth'])
+            twin.set_ylabel('Absorbance (OD)', fontsize=s['fontsize'],
+                            color='black', labelpad=7)
+            twin.tick_params(axis='y', labelsize=s['fontsize'], colors='black')
+            if not s.get('ta_uvvis_auto', True):
+                twin.set_ylim(s.get('ta_uvvis_min', -0.75),
+                              s.get('ta_uvvis_max', 0.75))
+            # The twin owns the right spine; keep it in the figure's box style.
+            for spine in twin.spines.values():
+                spine.set_linewidth(s.get('box_linewidth', 1.0))
+                spine.set_color(s.get('box_color', '#000000'))
+            # Proxy handle so UV-vis appears in the main axes' legend rather
+            # than needing a second, separately-positioned legend box.
+            proxy, = ax.plot([], [], color='black', linewidth=s['linewidth'])
+            handles.append(proxy)
+            labels.append('UV-vis')
+            sources.append(('ta_uvvis', 0))
+
+    _style_ax(ax, is_left, TA_XLABEL_WAVELENGTH, TA_YLABEL_DELTA_A, s)
+    _add_legend(ax, handles, labels, s, sources)
+    _panel_title(ax, idx, s)
+    return 0
+
+
+def _ta_band_traces(m, s: dict):
+    """The two probe-band kinetic traces, normalised together if asked."""
+    norm = tuple(s.get('ta_norm_window', ta_data.NORM_WINDOW_PS)) \
+        if s.get('ta_normalize', True) else None
+    high = ta_data.kinetic_trace(m, *s.get('ta_high_band', ta_data.HIGH_BAND_NM),
+                                 norm_window=norm)
+    low = ta_data.kinetic_trace(m, *s.get('ta_low_band', ta_data.LOW_BAND_NM),
+                                norm_window=norm)
+    return high, low
+
+
+def _plot_ta_kinetics(ax, ds: dict, s: dict, is_left: bool, idx: int):
+    """Manuscript panel d: fix the wavelength band, scan time."""
+    m = _ta_load(ds)
+    if m is None:
+        return 1
+
+    (t_high, y_high), (t_low, y_low) = _ta_band_traces(m, s)
+    high_band = s.get('ta_high_band', ta_data.HIGH_BAND_NM)
+    low_band = s.get('ta_low_band', ta_data.LOW_BAND_NM)
+    high_label = s.get('ta_high_label') or \
+        f'{high_band[0]:g}-{high_band[1]:g} nm'
+    low_label = s.get('ta_low_label') or f'{low_band[0]:g}-{low_band[1]:g} nm'
+
+    colors = _viridis_colors(2)
+    handles, labels, sources = [], [], []
+    for t, y, label, color, key in (
+        (t_high, y_high, high_label, colors[0], 'high'),
+        (t_low, y_low, low_label, colors[1], 'low'),
+    ):
+        line, = ax.plot(t, y, color=color, linewidth=s['linewidth'])
+        handles.append(line)
+        labels.append(label)
+        sources.append(('ta_band', key))
+
+    fit = (s.get('ta_fits') or {}).get(ds.get('uid'))
+    if s.get('ta_fit_overlay', True) and fit and fit.get('success'):
+        _ta_overlay_fit(ax, m, fit, s, handles, labels, sources)
+
+    ylabel = (r'$\Delta A$ (normalized)' if s.get('ta_normalize', True)
+              else TA_YLABEL_DELTA_A)
+    _style_ax(ax, is_left, TA_XLABEL_DELAY, ylabel, s)
+    _ta_apply_time_scale(ax, s, m.time_ps.min(), m.time_ps.max())
+    _add_legend(ax, handles, labels, s, sources)
+    _panel_title(ax, idx, s)
+    return 0
+
+
+def _ta_overlay_fit(ax, m, fit: dict, s: dict, handles, labels, sources):
+    """Draw the global-fit model through each band trace.
+
+    The stored fit holds shared lifetimes, not per-band amplitudes, so the two
+    amplitudes for each band are re-solved here by least squares against the
+    same basis — the lifetimes are what the fit determined.
+    """
+    t_fit = np.asarray(fit['time_ps'], dtype=float)
+    basis = ta_data.kinetic_basis(t_fit, fit['tau_rise_ps'],
+                                  fit['tau_transfer_ps'], fit['tau_long_ps'])
+    norm = tuple(s.get('ta_norm_window', ta_data.NORM_WINDOW_PS)) \
+        if s.get('ta_normalize', True) else None
+
+    for band, key in ((s.get('ta_high_band', ta_data.HIGH_BAND_NM), 'high'),
+                      (s.get('ta_low_band', ta_data.LOW_BAND_NM), 'low')):
+        t_all, y_all = ta_data.kinetic_trace(m, *band, norm_window=norm)
+        y = np.interp(t_fit, t_all, y_all)
+        good = np.isfinite(y)
+        if good.sum() < 3:
+            continue
+        amps, *_ = np.linalg.lstsq(basis[good], y[good], rcond=None)
+        line, = ax.plot(t_fit, basis @ amps, '--', color='black',
+                        linewidth=max(0.8, s['linewidth'] * 0.6))
+        if key == 'high':
+            handles.append(line)
+            labels.append('Global fit')
+            sources.append(('ta_fit', key))
+
+    if s.get('ta_fit_annotate', True):
+        ax.text(0.98, 0.97, _ta_tau_text(fit), transform=ax.transAxes,
+                ha='right', va='top', fontsize=max(6, s['fontsize'] - 1),
+                color='black')
+
+
+def _ta_tau_text(fit: dict) -> str:
+    fixed = ' (fixed)' if fit.get('tau_long_fixed') else ''
+    return (f"$\\tau_1$ = {fit['tau_rise_ps']:.3g} ps\n"
+            f"$\\tau_2$ = {fit['tau_transfer_ps']:.3g} ps\n"
+            f"$\\tau_3$ = {fit['tau_long_ps']:.3g} ps{fixed}")
+
+
+def _plot_ta_sas(ax, ds: dict, s: dict, is_left: bool, idx: int):
+    """Species-associated spectra: the amplitude of each fitted temporal
+    component as a function of wavelength. Needs a fit to have been run."""
+    fit = (s.get('ta_fits') or {}).get(ds.get('uid'))
+    if not fit or not fit.get('success'):
+        ax.text(0.5, 0.5, 'Run the global fit first', transform=ax.transAxes,
+                ha='center', va='center', fontsize=s['fontsize'], color='#777')
+        _style_ax(ax, is_left, TA_XLABEL_WAVELENGTH, 'Fitted amplitude (mOD)', s)
+        _panel_title(ax, idx, s)
+        return 0
+
+    wave = np.asarray(fit['wavelength_nm'], dtype=float)
+    keep = _ta_trim_mask(wave, s)
+    colors = _viridis_colors(2)
+    handles, labels, sources = [], [], []
+    for values, label, color, key in (
+        (fit['sas_transfer'], 'Transfer / cooling', colors[0], 'transfer'),
+        (fit['sas_long'], 'Long-lived', colors[1], 'long'),
+    ):
+        line, = ax.plot(wave[keep], np.asarray(values, dtype=float)[keep],
+                        color=color, linewidth=s['linewidth'])
+        handles.append(line)
+        labels.append(label)
+        sources.append(('ta_sas', key))
+
+    if s.get('ta_zero_line', True):
+        ax.axhline(0.0, linewidth=0.8, color='black', zorder=0)
+
+    _style_ax(ax, is_left, TA_XLABEL_WAVELENGTH, 'Fitted amplitude (mOD)', s)
+    _add_legend(ax, handles, labels, s, sources)
+    _panel_title(ax, idx, s)
+    return 0
+
+
+def _plot_ta(fig, axes: list, s: dict) -> int:
+    kind = s.get('ta_plot_kind', 'map')
+    datasets = s.get('ta_datasets', [])
+    failed = 0
+    for i, ax in enumerate(axes):
+        ds = datasets[i] if i < len(datasets) else None
+        if not ds:
+            # An empty panel is normal while a figure is being built up.
+            _style_ax(ax, i == 0, TA_XLABEL_DELAY, TA_YLABEL_DELTA_A, s)
+            _panel_title(ax, i, s)
+            continue
+        if kind == 'map':
+            failed += _plot_ta_map(fig, ax, ds, s, i == 0, i)
+        elif kind == 'slices':
+            failed += _plot_ta_slices(ax, ds, s, i == 0, i)
+        elif kind == 'kinetics':
+            failed += _plot_ta_kinetics(ax, ds, s, i == 0, i)
+        else:
+            failed += _plot_ta_sas(ax, ds, s, i == 0, i)
+    return failed
+
+
 def _axis_limits_with_padding(values) -> tuple[float, float]:
     arr = np.asarray(values, dtype=float)
     arr = arr[np.isfinite(arr)]
@@ -3858,6 +4897,8 @@ def do_plot(fig: Figure, s: dict) -> str:
         failed = _plot_pl(axes, s)
     elif pt == 'absorbance':
         failed = _plot_absorbance(axes, s)
+    elif pt == 'ta':
+        failed = _plot_ta(fig, axes, s)
     else:
         failed = _plot_xrd(axes, s)
 
@@ -4216,6 +5257,7 @@ class MainWindow(QMainWindow):
         self._plot_called_for_test = False
         self.controls.plot_requested.connect(self._do_plot)
         self.controls.live_update_requested.connect(self._auto_replot)
+        self.controls.ta_fit_requested.connect(self._run_ta_fit)
         self.controls.spin_fw.valueChanged.connect(self._mark_canvas_size_pending)
         self.controls.spin_fh.valueChanged.connect(self._mark_canvas_size_pending)
         self.controls.chk_snap.toggled.connect(self._update_snap)
@@ -4386,6 +5428,68 @@ class MainWindow(QMainWindow):
         if getattr(self, "_default_state", None) is not None:
             self.restoreState(self._default_state)
 
+    def _run_ta_fit(self):
+        """Fit every loaded TA map and cache the result per dataset.
+
+        Deliberately on demand rather than on every replot: a fit takes a
+        noticeable moment and, more importantly, silently refitting whenever a
+        style control moved would make the quoted lifetimes hard to trust.
+        """
+        settings = self.controls.settings()
+        datasets = [d for d in settings.get('ta_datasets', []) if d]
+        if not datasets:
+            QMessageBox.information(
+                self, 'No TA data',
+                'Load at least one TA .dat map before running the global fit.')
+            return
+
+        fit_range = settings.get('ta_fit_range', ta_data.FIT_TIME_RANGE_PS)
+        tau_long = settings.get('ta_tau_long', ta_data.DEFAULT_TAU_LONG_PS)
+        fit_tau_long = settings.get('ta_fit_tau_long', False)
+        # Fit the same probe window that is plotted; including the noisy
+        # detector edges pulls the fit into a degenerate minimum.
+        w_range = (settings.get('ta_trim_range')
+                   if settings.get('ta_trim', True) else None)
+
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+        lines, warnings = [], []
+        try:
+            for ds in datasets:
+                m = load_ta_map(ds['path'])
+                if m is None:
+                    lines.append(f"{ds['display_name']}: could not read file")
+                    continue
+                fit = ta_data.fit_global_map(
+                    m, t_range=fit_range, w_range=w_range, tau_long=tau_long,
+                    fit_tau_long=fit_tau_long)
+                if not fit.get('success'):
+                    lines.append(f"{ds['display_name']}: {fit.get('error')}")
+                    continue
+                self.controls.ta_fits[ds['uid']] = fit
+                lines.append(
+                    f"{ds['display_name']}: "
+                    f"τ₁ = {fit['tau_rise_ps']:.3g} ps, "
+                    f"τ₂ = {fit['tau_transfer_ps']:.3g} ps, "
+                    f"τ₃ = {fit['tau_long_ps']:.3g} ps"
+                    f"{' (fixed)' if fit['tau_long_fixed'] else ''}, "
+                    f"RMS = {fit['rms_residual_mod']:.3g} mOD")
+                if fit.get('warning'):
+                    warnings.append(f"{ds['display_name']}: {fit['warning']}")
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self.controls.lbl_ta_fit.setText('\n'.join(lines) or 'No fit produced.')
+        for line in lines:
+            self._status_message(f'TA fit — {line}')
+
+        # A lifetime that stopped on a bound was chosen by the box, not the
+        # data, so say so rather than letting it be quoted as a result.
+        if warnings:
+            QMessageBox.warning(self, 'TA fit not fully constrained',
+                                '\n\n'.join(warnings))
+
+        self._do_plot()
+
     def _status_message(self, msg: str):
         self.statusBar().showMessage(msg)
         if getattr(self, "log_dock", None) is not None:
@@ -4448,6 +5552,16 @@ class MainWindow(QMainWindow):
                 text = f'2θ: {x:.2f}°   Intensity: {y:.0f}'
         elif mode == 'iv':
             text = f'Voltage: {x:.3g} V   Current: {y:.4g}'
+        elif mode == 'ta':
+            kind = self.controls.ta_plot_kind()
+            if kind == 'map':
+                text = f'Delay: {x:.3g} ps   Wavelength: {y:.2f} nm'
+            elif kind == 'kinetics':
+                text = f'Delay: {x:.3g} ps   ΔA: {y:.4g}'
+            elif kind == 'sas':
+                text = f'Wavelength: {x:.2f} nm   Amplitude: {y:.4g} mOD'
+            else:
+                text = f'Wavelength: {x:.2f} nm   ΔA: {y:.4g} mOD'
         else:
             text = f'x: {x:.3f}   y: {y:.4g}'
         self._sb_coord.setText(text)
@@ -4486,6 +5600,16 @@ class MainWindow(QMainWindow):
             if problem:
                 if not silent:
                     QMessageBox.information(self, 'Missing IV Data', problem)
+                return
+        elif s['plot_type'] == 'ta':
+            # TA data lives in ta_datasets, not in the 1-D trace panels, so it
+            # needs its own emptiness check rather than the panel_data one.
+            if not any(s.get('ta_datasets') or []):
+                if not silent:
+                    QMessageBox.information(
+                        self, 'No TA Data',
+                        'Load at least one TA .dat map, then click Plot.'
+                    )
                 return
         else:
             has_data = any(len(p['traces']) > 0 for p in s['panel_data'])

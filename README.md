@@ -14,6 +14,7 @@ Built with Python, PyQt6, and Matplotlib.
 | **Absorbance** | UV-Vis absorbance spectra with the same multi-panel layout |
 | **XRD** | X-ray diffraction patterns; optional 2θ → d-spacing conversion, reference overlays, right-margin trace labels |
 | **IV Curve** | Keithley IV sweeps; auto-stitches the −20 to 0 V and 0 to 20 V CSVs per device and auto-scales current units (A → mA → µA → nA → pA) |
+| **Transient Absorption (TA)** | 2-D ΔA(λ, t) maps from pump-probe experiments; heatmap, spectral slices with UV-vis overlay, band kinetics, and a global two-component kinetic fit |
 
 ---
 
@@ -53,6 +54,18 @@ Built with Python, PyQt6, and Matplotlib.
 - PL: peak-order legend sorting (high → low peak wavelength)
 - XRD: per-panel reference traces (plotted in black over all panels), right-margin trace labels with adjustable gap
 - Manual subplot layout (left, bottom, width, height, gap) with snap
+
+### Transient absorption
+- Loads 2-D TA `.dat` maps (wavelength × pump-probe delay, ΔA in mOD), one map per panel
+- Four plot types from the same data:
+  - **Map** — ΔA(λ, t) heatmap with symmetric colour limits, linear/symlog/log delay axis and a colorbar
+  - **Spectral slices** — ΔA vs wavelength averaged over editable delay windows, viridis-coloured, with an optional steady-state UV-vis spectrum on a twin right axis
+  - **Kinetics** — ΔA vs delay for the high- and low-bandgap probe bands, optionally normalised to a late-time window
+  - **Global fit spectra** — the species-associated spectrum of each fitted component
+- Probe-window trim drops the detector edge channels, which are noise rather than signal
+- Global kinetic fit (numpy only, no SciPy): shared lifetimes with wavelength-dependent
+  amplitudes solved by variable projection, τ₃ fixed or fitted, run on demand.
+  A lifetime that stops on a bound is reported as unconstrained rather than quoted as a result.
 
 ### Preset system
 All style settings (line width, font, ticks, legend, box, XRD options, etc.) can be **saved to a JSON file** and **loaded back** — data paths are never included in presets so they are portable across machines.
@@ -124,6 +137,8 @@ If a required package is missing, the app prints the exact install command and e
 ```
 spectra_app.py          — main application (UI, plotting, file I/O)
 spectra_theme.py        — palette, stylesheet, and shadow helpers
+ta_data.py              — transient-absorption parsing, slicing, and kinetic fitting (numpy only)
+ta_batch.py             — CLI that batch-analyzes a folder of TA .dat files
 requirements_spectra.txt
 assets/
   logo.png              — header logo (optional; app starts without it)
@@ -131,6 +146,7 @@ assets/
   screenshots/          — README screenshots generated from the current UI
 tests/
   test_loading_screen.py
+  test_ta_data.py
   test_spectra_aux_docks.py
   test_spectra_plotting_behavior.py
   test_spectra_static_regressions.py
@@ -138,6 +154,24 @@ tests/
   test_spectra_ui_layout.py
   test_spectra_window_chrome.py
 ```
+
+---
+
+## Batch TA analysis
+
+To process a whole folder of TA files without opening the GUI:
+
+```bash
+python ta_batch.py "path/to/TA folder"      # heatmaps, slices, kinetics, global fit
+python ta_batch.py "path/to/TA folder" --no-fit
+python ta_batch.py "path/to/TA folder" --bootstrap 100
+```
+
+It recurses through the folder, matches each `.dat` to its UV-vis CSV by n-value and
+morphology, and writes PNG + PDF plots, CSV exports, `metadata.json` and
+`fit_summary.json` per sample into a `TA_Analysis/` subfolder, plus a top-level
+`TA_batch_summary.csv`. The fitting maths is shared with the GUI via `ta_data.py`,
+so batch numbers and on-screen figures cannot drift apart.
 
 ---
 
@@ -170,6 +204,29 @@ Two-column plain text. Any of these are accepted:
 ### IV CSV (Keithley format)
 
 Column 3 = voltage (V), column 4 = current (A). Rows with fewer than 4 numeric columns are skipped.
+
+### Transient absorption `.dat`
+
+Two instrument header lines, then one numeric block:
+
+```
+XAxisTitle Wavelength (nm)
+YAxisTitle Delay (ps)
+0.0        380.0   381.0   ...   550.0
+-10.0        ΔA      ΔA     ...    ΔA
+1.0          ΔA      ΔA     ...    ΔA
+...
+```
+
+The first numeric row holds the probe wavelengths (its leading cell is a placeholder),
+the first numeric column the pump-probe delays, and the interior ΔA in mOD.
+Both axes may be in any order; they are sorted on load.
+
+Filenames of the form
+`20260824_n1p5_ES_Ex370_380LP_5kHz_300acq_MA_pwr100.0_CH.dat` are parsed for the
+sample n-value, morphology (`ES` electrospun / `S` spin-coated), excitation
+wavelength, long-pass filter, repetition rate, acquisitions and pump power, and
+turned into a short trace label. Unrecognised names still load, labelled by filename.
 
 ---
 

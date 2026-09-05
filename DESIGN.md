@@ -15,6 +15,7 @@ colors:
   mode-pl: "#F472B6"
   mode-abs: "#38BDF8"
   mode-xrd: "#A78BFA"
+  mode-ta: "#34D399"
 typography:
   body:
     fontFamily: "'IBM Plex Sans', 'Inter', system-ui, sans-serif"
@@ -70,6 +71,7 @@ A restrained monochrome palette: pure white ground, two neutral surface depths, 
   - **PL Pink** (`#F472B6`): Default trace color in PL mode
   - **Absorbance Blue** (`#38BDF8`): Default trace color in Absorbance mode
   - **XRD Violet** (`#A78BFA`): Default trace color in XRD mode
+  - **TA Teal** (`#34D399`): Default trace color in Transient Absorption mode
 
 ### Neutral
 - **Canvas White** (`#FFFFFF`): App and plot background.
