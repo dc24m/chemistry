@@ -23,13 +23,20 @@ def _function_source(name: str) -> str:
 
 
 class SpectraStaticRegressionTest(unittest.TestCase):
-    def test_do_plot_applies_separate_panel_x_limits(self):
-        source = _function_source("do_plot")
+    def test_panel_x_window_resolves_separate_panel_x_limits(self):
+        source = _function_source("panel_x_window")
 
         self.assertIn("separate_x_limits", source)
         self.assertIn("panel_x_limits", source)
-        self.assertIn("limit_cfg", source)
         self.assertIn("auto_x", source)
+
+    def test_do_plot_takes_its_x_limits_from_panel_x_window(self):
+        # The normalize options measure against the same helper, so routing
+        # do_plot through it is what keeps scaling and axis limits in step.
+        source = _function_source("do_plot")
+
+        self.assertIn("panel_x_window(s, idx)", source)
+        self.assertIn("set_xlim", source)
 
     def test_style_ax_applies_tick_label_padding(self):
         source = _function_source("_style_ax")

@@ -326,6 +326,89 @@ def normalize_xrd_intensity(y):
     return y / ymax
 
 
+def panel_x_window(s: dict, idx: int):
+    """The X range panel `idx` will be drawn over, exactly as configured, or None
+    when the panel auto-fits to its data. The pair is returned in the order the
+    user typed it (an inverted range still reverses the axis), so callers doing
+    data maths must sort it themselves. Single source of truth for both the axis
+    limits and any window-relative maths, so the two cannot drift apart."""
+    if s.get('separate_x_limits', False):
+        limits = s.get('panel_x_limits', [])
+        cfg = limits[idx] if idx < len(limits) else {}
+        if cfg.get('auto_x', False):
+            return None
+        lo = cfg.get('x_min', s.get('x_min'))
+        hi = cfg.get('x_max', s.get('x_max'))
+    elif s.get('auto_x', True):
+        return None
+    else:
+        lo, hi = s.get('x_min'), s.get('x_max')
+    if lo is None or hi is None:
+        return None
+    return (float(lo), float(hi))
+
+
+def panel_y_window(s: dict, idx: int):
+    """The Y range panel `idx` is drawn over, exactly as configured, or None
+    when it auto-fits to its data. Mirrors panel_x_window: per-panel limits win
+    over the global pair, and either level can opt into auto. The order is
+    preserved, so an inverted range still flips the axis."""
+    if s.get('separate_y_limits', False):
+        limits = s.get('panel_y_limits', [])
+        cfg = limits[idx] if idx < len(limits) else {}
+        if cfg.get('auto_y', False):
+            return None
+        lo = cfg.get('y_min', s.get('y_min'))
+        hi = cfg.get('y_max', s.get('y_max'))
+    elif s.get('auto_y', True):
+        return None
+    else:
+        lo, hi = s.get('y_min'), s.get('y_max')
+    if lo is None or hi is None:
+        return None
+    return (float(lo), float(hi))
+
+
+def panel_rects(rect, n: int, gap: float, vertical: bool) -> list:
+    """Split a plot-box rect (left, bottom, width, height, in figure fractions)
+    into `n` panel rects separated by `gap`. Panel 0 is the top one when
+    stacking vertically and the left-most one otherwise, matching the order
+    panels are numbered in the UI."""
+    left, bottom, width, height = rect
+    if vertical:
+        ph = max(0.02, (height - (n - 1) * gap) / n)
+        # Panel 0 sits at the top, so it gets the highest y.
+        return [(left, bottom + (n - 1 - j) * (ph + gap), width, ph)
+                for j in range(n)]
+    pw = max(0.02, (width - (n - 1) * gap) / n)
+    return [(left + j * (pw + gap), bottom, pw, height) for j in range(n)]
+
+
+def normalize_in_window(x, y, window):
+    """Scale y so its maximum inside `window` becomes 1.
+
+    Points outside the window are scaled by the same factor rather than clipped,
+    so the trace stays continuous — out-of-window noise may land above 1, which
+    is the whole point: a detector artifact beyond the plotted range no longer
+    flattens the features inside it.
+
+    window=None (auto X) normalizes over the whole trace, i.e. the old behavior.
+    A window holding no finite points falls back to the same, so a mistyped
+    range degrades gracefully instead of blanking the trace."""
+    y = np.asarray(y, dtype=float)
+    if window is None or y.size == 0:
+        return normalize_xrd_intensity(y)
+    x = np.asarray(x, dtype=float)
+    lo, hi = (window[0], window[1]) if window[0] <= window[1] else (window[1], window[0])
+    inside = np.isfinite(x) & np.isfinite(y) & (x >= lo) & (x <= hi)
+    if not np.any(inside):
+        return normalize_xrd_intensity(y)
+    ymax = np.max(y[inside])
+    if not np.isfinite(ymax) or ymax == 0:
+        return y
+    return y / ymax
+
+
 def savgol_smooth(y, window_length: int, polyorder: int = 3):
     """Numpy-only Savitzky-Golay smoothing (no scipy dependency in this app).
     Fits a local polynomial per window via least squares, so peak shape is
@@ -441,10 +524,21 @@ class FigureState:
     data:   dict = None
 
 
+class FigureTabButton(QPushButton):
+    """A figure tab. QPushButton has no double-click signal of its own, and the
+    tab label is the natural place to rename a figure, so we add one."""
+    doubleClicked = pyqtSignal()
+
+    def mouseDoubleClickEvent(self, event):
+        self.doubleClicked.emit()
+        event.accept()
+
+
 class FigureTabBar(QWidget):
     figure_selected      = pyqtSignal(int)
     figure_close_requested = pyqtSignal(int)
     figure_add_requested = pyqtSignal()
+    figure_rename_requested = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -473,12 +567,15 @@ class FigureTabBar(QWidget):
         slot_lay.setContentsMargins(0, 0, 0, 0)
         slot_lay.setSpacing(s(2))
 
-        tab_btn = QPushButton(label)
+        tab_btn = FigureTabButton(label)
         tab_btn.setObjectName('figureTab')
         tab_btn.setCheckable(True)
         tab_btn.setFixedHeight(s(26))
         tab_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        tab_btn.setToolTip('Double-click to rename')
         tab_btn.clicked.connect(lambda _, i=idx: self.figure_selected.emit(i))
+        tab_btn.doubleClicked.connect(
+            lambda i=idx: self.figure_rename_requested.emit(i))
         self._group.addButton(tab_btn)
 
         close_btn = QPushButton('×')
@@ -508,21 +605,27 @@ class FigureTabBar(QWidget):
         self._slots.pop(idx)
         # Re-wire click signals for shifted indices
         for i, (btn, cbtn) in enumerate(self._slots):
-            try:
-                btn.clicked.disconnect()
-            except RuntimeError:
-                pass
-            try:
-                cbtn.clicked.disconnect()
-            except RuntimeError:
-                pass
+            for sig in (btn.clicked, btn.doubleClicked, cbtn.clicked):
+                try:
+                    sig.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
             btn.clicked.connect(lambda _, n=i: self.figure_selected.emit(n))
+            btn.doubleClicked.connect(
+                lambda n=i: self.figure_rename_requested.emit(n))
             cbtn.clicked.connect(lambda _, n=i: self.figure_close_requested.emit(n))
         self._update_close_visibility()
 
     def set_active(self, idx: int):
         if 0 <= idx < len(self._slots):
             self._slots[idx][0].setChecked(True)
+
+    def set_label(self, idx: int, label: str):
+        if 0 <= idx < len(self._slots):
+            self._slots[idx][0].setText(label)
+
+    def label(self, idx: int) -> str:
+        return self._slots[idx][0].text() if 0 <= idx < len(self._slots) else ''
 
     def _update_close_visibility(self):
         show = len(self._slots) > 1
@@ -1510,6 +1613,11 @@ class ControlPanel(QScrollArea):
         self.spin_panels.valueChanged.connect(self._on_panels_change)
         gl.addLayout(_labeled('Panels', self.spin_panels))
 
+        # Panels sit side by side or stacked; the gap below applies either way.
+        self.combo_orientation = QComboBox()
+        self.combo_orientation.addItems(['Horizontal', 'Vertical'])
+        gl.addLayout(_labeled('Layout', self.combo_orientation))
+
         self.spin_gap = FlatDoubleSpinBox()
         self.spin_gap.setRange(0.0, 1.0)
         self.spin_gap.setSingleStep(0.05)
@@ -1665,11 +1773,47 @@ class ControlPanel(QScrollArea):
         self.chk_auto_y = QCheckBox('Auto Y (fit to data)')
         self.chk_auto_y.setChecked(True)
         agl.addWidget(self.chk_auto_y)
+
+        # Per-panel Y limits — the mirror of the X block above, and off by
+        # default so the global range keeps applying to every panel.
+        self.chk_separate_y = QCheckBox('Use separate Y limits per panel')
+        self.chk_separate_y.setChecked(False)
+        self.chk_separate_y.toggled.connect(self._toggle_separate_y)
+        agl.addWidget(self.chk_separate_y)
+
+        self._panel_y = [{'auto': False, 'min': 0.0, 'max': 1.0} for _ in range(5)]
+        self._ypanel_idx = 0
+        self.combo_ypanel = QComboBox()
+        self.combo_ypanel.addItems([f'P{i+1}' for i in range(5)])
+        self.combo_ypanel.currentIndexChanged.connect(self._on_ypanel_change)
+        agl.addLayout(_labeled('Edit panel', self.combo_ypanel))
+        self.chk_pauto_y = QCheckBox('Auto Y (this panel)')
+        self.chk_pauto_y.toggled.connect(self._toggle_panel_ylim)
+        agl.addWidget(self.chk_pauto_y)
+        pyrow = QHBoxLayout(); pyrow.setSpacing(s(5))
+        pyl = QLabel('Y range'); pyl.setFixedWidth(s(66)); pyl.setObjectName('fieldlbl')
+        self.spin_pymin = FlatDoubleSpinBox()
+        self.spin_pymax = FlatDoubleSpinBox()
+        for sb in (self.spin_pymin, self.spin_pymax):
+            sb.setRange(-9999999, 9999999); sb.setDecimals(2)
+            sb.setMinimumWidth(s(56))
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.spin_pymin.setValue(0); self.spin_pymax.setValue(1)
+        pdash2 = QLabel('–'); pdash2.setStyleSheet('color:#8a93a0;')
+        pdash2.setFixedWidth(s(12)); pdash2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pyrow.addWidget(pyl); pyrow.addWidget(self.spin_pymin, 1)
+        pyrow.addWidget(pdash2); pyrow.addWidget(self.spin_pymax, 1)
+        agl.addLayout(pyrow)
+        self._sepy_widgets = [self.combo_ypanel, self.chk_pauto_y,
+                              self.spin_pymin, self.spin_pymax]
+
         agl.addWidget(_sep())
 
         self.chk_share_y = QCheckBox('Share Y limits across panels')
         self.chk_share_y.setChecked(True)
         agl.addWidget(self.chk_share_y)
+        # Deferred until here: it greys out chk_share_y, built just above.
+        self._toggle_separate_y(False)
         lay.addWidget(self.g_axes)
 
         self.chk_auto_x.stateChanged.connect(self._toggle_xlim)
@@ -1969,13 +2113,31 @@ class ControlPanel(QScrollArea):
         plgl.addWidget(pl_note)
         self.chk_pl_normalize = QCheckBox('Normalize (0–1)')
         self.chk_pl_normalize.setChecked(False)
-        pl_norm_note = QLabel('Scales each trace to its own max so spectra of\n'
-                              'different intensity overlay on a 0–1 scale.')
+        pl_norm_note = QLabel('Scales each trace to its peak inside the plotted\n'
+                              'X range so spectra of different intensity overlay\n'
+                              'on a 0–1 scale. Auto X uses the whole trace.')
         pl_norm_note.setObjectName('hint')
         pl_norm_note.setWordWrap(True)
         plgl.addWidget(self.chk_pl_normalize)
         plgl.addWidget(pl_norm_note)
         lay.addWidget(self.g_pl)
+
+        # ── Absorbance options
+        self.g_abs = QGroupBox('Absorbance Options')
+        abgl = QVBoxLayout(self.g_abs)
+        abgl.setSpacing(vs(9))
+        self.chk_abs_normalize = QCheckBox('Normalize (0–1)')
+        self.chk_abs_normalize.setChecked(False)
+        abs_norm_note = QLabel('Scales each trace to its peak inside the plotted\n'
+                               'X range, so scatter or detector noise outside\n'
+                               'that range cannot set the scale. Auto X uses the\n'
+                               'whole trace.')
+        abs_norm_note.setObjectName('hint')
+        abs_norm_note.setWordWrap(True)
+        abgl.addWidget(self.chk_abs_normalize)
+        abgl.addWidget(abs_norm_note)
+        self.g_abs.setVisible(False)
+        lay.addWidget(self.g_abs)
 
         # ── XRD options
         self.g_xrd = QGroupBox('XRD Options')
@@ -2436,12 +2598,16 @@ class ControlPanel(QScrollArea):
         self.g_iv.setVisible(is_iv)
         self.g_smooth.setVisible(not is_iv and not is_ta)
         self.g_pl.setVisible(key == 'pl')
+        self.g_abs.setVisible(key == 'absorbance')
         self.g_xrd.setVisible(key == 'xrd')
         self.g_ta.setVisible(is_ta)
         self.g_ta_opts.setVisible(is_ta)
 
     def current_mode(self) -> str:
         return self._current_mode
+
+    def panel_orientation(self) -> str:
+        return self.combo_orientation.currentText().lower()
 
     def _on_panels_change(self, n: int):
         for i in range(5):
@@ -2526,9 +2692,9 @@ class ControlPanel(QScrollArea):
         self.spin_xmax.setEnabled(enabled)
 
     def _toggle_ylim(self):
-        auto = self.chk_auto_y.isChecked()
-        self.spin_ymin.setEnabled(not auto)
-        self.spin_ymax.setEnabled(not auto)
+        enabled = not self.chk_auto_y.isChecked() and not self.chk_separate_y.isChecked()
+        self.spin_ymin.setEnabled(enabled)
+        self.spin_ymax.setEnabled(enabled)
 
     def _toggle_sci(self, *_):
         sci = self.combo_ynot.currentText().startswith('Scientific')
@@ -2577,6 +2743,47 @@ class ControlPanel(QScrollArea):
         auto = self.chk_pauto_x.isChecked()
         self.spin_pxmin.setEnabled(not auto)
         self.spin_pxmax.setEnabled(not auto)
+
+    def _toggle_separate_y(self, on: bool):
+        for w in self._sepy_widgets:
+            w.setEnabled(on)
+        self.chk_auto_y.setEnabled(not on)
+        # Sharing Y across panels is meaningless once each panel sets its own.
+        self.chk_share_y.setEnabled(not on)
+        self._toggle_ylim()
+        if on:
+            self._load_ypanel(self._ypanel_idx)
+            self._toggle_panel_ylim()
+
+    def _flush_ypanel(self):
+        """Save the per-panel Y editor widgets into the current panel's record."""
+        self._panel_y[self._ypanel_idx] = {
+            'auto': self.chk_pauto_y.isChecked(),
+            'min': self.spin_pymin.value(),
+            'max': self.spin_pymax.value(),
+        }
+
+    def _load_ypanel(self, idx: int):
+        d = self._panel_y[idx]
+        self.chk_pauto_y.setChecked(d['auto'])
+        self.spin_pymin.setValue(d['min'])
+        self.spin_pymax.setValue(d['max'])
+
+    def _on_ypanel_change(self, new_idx: int):
+        if new_idx == self._ypanel_idx:
+            return
+        self._flush_ypanel()
+        self._ypanel_idx = new_idx
+        self._load_ypanel(new_idx)
+        self._toggle_panel_ylim()
+
+    def _toggle_panel_ylim(self, *_):
+        # Honor the per-panel Auto-Y within the per-panel editor.
+        if not self.chk_separate_y.isChecked():
+            return
+        auto = self.chk_pauto_y.isChecked()
+        self.spin_pymin.setEnabled(not auto)
+        self.spin_pymax.setEnabled(not auto)
 
     def _toggle_legend(self, *_):
         # Transparent toggles disable their corresponding color/value inputs.
@@ -2721,6 +2928,7 @@ class ControlPanel(QScrollArea):
         tab restores everything. Style reuses the preset machinery; axes and
         labels (not part of presets) are captured here too."""
         self._flush_xpanel()
+        self._flush_ypanel()
         return {
             # ── Data ──
             'n_panels': self.spin_panels.value(),
@@ -2748,6 +2956,9 @@ class ControlPanel(QScrollArea):
                 'auto_y': self.chk_auto_y.isChecked(),
                 'y_min': self.spin_ymin.value(),
                 'y_max': self.spin_ymax.value(),
+                'separate_y': self.chk_separate_y.isChecked(),
+                'panel_y': [dict(d) for d in self._panel_y],
+                'ypanel_idx': self._ypanel_idx,
                 'share_y': self.chk_share_y.isChecked(),
                 'panel_gap': self.spin_gap.value(),
             },
@@ -2830,6 +3041,12 @@ class ControlPanel(QScrollArea):
         _chk(self.chk_auto_y, a.get('auto_y', True))
         _val(self.spin_ymin, a.get('y_min', 0.0))
         _val(self.spin_ymax, a.get('y_max', 1.0))
+        _chk(self.chk_separate_y, a.get('separate_y', False))
+        self._panel_y = [dict(d) for d in a.get('panel_y', self._panel_y)]
+        self._ypanel_idx = a.get('ypanel_idx', 0)
+        self.combo_ypanel.blockSignals(True)
+        self.combo_ypanel.setCurrentIndex(self._ypanel_idx)
+        self.combo_ypanel.blockSignals(False)
         _chk(self.chk_share_y, a.get('share_y', True))
         _val(self.spin_gap, a.get('panel_gap', 0.30))
 
@@ -2844,6 +3061,7 @@ class ControlPanel(QScrollArea):
 
         # Refresh enable/visibility states that the blocked setters skipped.
         self._toggle_separate_x(self.chk_separate_x.isChecked())
+        self._toggle_separate_y(self.chk_separate_y.isChecked())
         self._toggle_xlim()
         self._toggle_ylim()
         self._toggle_sci()
@@ -2851,6 +3069,8 @@ class ControlPanel(QScrollArea):
         self._toggle_legend()
         if not self.chk_separate_x.isChecked():
             self._load_xpanel(self._xpanel_idx)
+        if not self.chk_separate_y.isChecked():
+            self._load_ypanel(self._ypanel_idx)
 
     # ── Settings export ────────────────────────────────────────────────────────
 
@@ -2872,11 +3092,16 @@ class ControlPanel(QScrollArea):
         while len(panel_titles) < 5:
             panel_titles.append(chr(ord('A') + len(panel_titles)))
 
-        # Snapshot the live per-panel X editor before reading the records.
+        # Snapshot the live per-panel editors before reading the records.
         self._flush_xpanel()
+        self._flush_ypanel()
         panel_x_limits = [
             {'auto_x': d['auto'], 'x_min': d['min'], 'x_max': d['max']}
             for d in self._panel_x
+        ]
+        panel_y_limits = [
+            {'auto_y': d['auto'], 'y_min': d['min'], 'y_max': d['max']}
+            for d in self._panel_y
         ]
 
         return {
@@ -2892,6 +3117,8 @@ class ControlPanel(QScrollArea):
             'auto_y': self.chk_auto_y.isChecked(),
             'y_min': self.spin_ymin.value(),
             'y_max': self.spin_ymax.value(),
+            'separate_y_limits': self.chk_separate_y.isChecked(),
+            'panel_y_limits': panel_y_limits,
             'share_y': self.chk_share_y.isChecked(),
             'show_main_title': self.chk_main_title.isChecked(),
             'main_title': self.edit_main_title.text().strip(),
@@ -2921,6 +3148,7 @@ class ControlPanel(QScrollArea):
             'smooth_amount': self.spin_smooth.value(),
             'pl_baseline_correct': self.chk_pl_baseline.isChecked(),
             'pl_normalize': self.chk_pl_normalize.isChecked(),
+            'abs_normalize': self.chk_abs_normalize.isChecked(),
             'xrd_d_spacing': self.chk_d.isChecked(),
             'xrd_lambda': self.spin_lam.value(),
             'xrd_ref_step': self.spin_ref_step.value(),
@@ -2992,6 +3220,7 @@ class ControlPanel(QScrollArea):
             'pa_bottom': self.spin_pa_bottom.value(),
             'panel_gap': self.spin_panel_gap.value(),
             'panel_wspace': self.spin_gap.value(),
+            'panel_orientation': self.panel_orientation(),
             # Snap-to-grid (consumed by the figure editor)
             'snap_enabled': self.chk_snap.isChecked(),
             'snap_step': self.spin_snap_step.value(),
@@ -3010,9 +3239,10 @@ class ControlPanel(QScrollArea):
         'legend_alignment', 'legend_markerfirst', 'legend_labelspacing', 'legend_2col',
         'box_linewidth', 'box_color', 'manual_layout',
         'pa_width', 'pa_height', 'pa_left', 'pa_bottom', 'panel_gap',
+        'panel_orientation',
         'snap_enabled', 'snap_step',
         'smooth_enabled', 'smooth_amount',
-        'pl_baseline_correct', 'pl_normalize',
+        'pl_baseline_correct', 'pl_normalize', 'abs_normalize',
         'xrd_d_spacing', 'xrd_lambda', 'xrd_ref_step', 'xrd_exp_step',
         'xrd_margin_labels', 'xrd_margin_label_gap', 'xrd_normalize',
         'xrd_divisor', 'xrd_log_exp',
@@ -3083,6 +3313,7 @@ class ControlPanel(QScrollArea):
             (self.chk_smooth,              'smooth_enabled'),
             (self.chk_pl_baseline,         'pl_baseline_correct'),
             (self.chk_pl_normalize,        'pl_normalize'),
+            (self.chk_abs_normalize,       'abs_normalize'),
             (self.chk_d,                   'xrd_d_spacing'),
             (self.chk_xrd_normalize,       'xrd_normalize'),
             (self.chk_xrd_log,             'xrd_log_exp'),
@@ -3104,6 +3335,8 @@ class ControlPanel(QScrollArea):
                 attr.blockSignals(False)
         # Combos
         if 'tick_dir'      in p: self.combo_tick_dir.setCurrentText(p['tick_dir'])
+        if 'panel_orientation' in p:
+            self.combo_orientation.setCurrentText(p['panel_orientation'].capitalize())
         if 'y_notation'    in p: self.combo_ynot.setCurrentText(p['y_notation'])
         if 'legend_loc'    in p: self.combo_legend_loc.setCurrentText(p['legend_loc'])
         if 'legend_alignment' in p: self.combo_legend_align.setCurrentText(p['legend_alignment'])
@@ -3613,10 +3846,10 @@ class FigureEditor:
         axes = list(fig.axes)
         n = len(axes) or 1
         gap = self.controls.spin_panel_gap.value() if self.controls else 0.04
-        l, b, w, h = rect
-        pw = max(0.02, (w - (n - 1) * gap) / n)
-        for j, ax in enumerate(axes):
-            ax.set_position([l + j * (pw + gap), b, pw, h])
+        vertical = (self.controls is not None
+                    and self.controls.panel_orientation() == 'vertical')
+        for ax, r in zip(axes, panel_rects(rect, n, gap, vertical)):
+            ax.set_position(list(r))
 
     def _update_box_drag(self, event):
         fig = self.cw.fig
@@ -4132,7 +4365,24 @@ def _apply_y_notation(ax, s: dict, is_left: bool = True):
     # Normal → leave matplotlib's default formatter untouched.
 
 
-def _style_ax(ax, is_left: bool, xlabel: str, ylabel: str, s: dict):
+def panel_axis_flags(s: dict, idx: int, n_panels: int = None) -> tuple:
+    """(is_left, is_bottom) — which edges of panel `idx` carry axis numbers and
+    an axis label.
+
+    Horizontal: Y numbers on the left-most panel only, X numbers on every panel.
+    Vertical: the mirror image — X numbers on the bottom panel only, Y numbers
+    on every panel — except when per-panel X limits are on, where each panel
+    spans a different range and hiding its numbers would misread the plot."""
+    n = s.get('n_panels', 1) if n_panels is None else n_panels
+    if s.get('panel_orientation', 'horizontal') != 'vertical':
+        return (idx == 0), True
+    is_bottom = (idx >= n - 1) or s.get('separate_x_limits', False)
+    return True, is_bottom
+
+
+def _style_ax(ax, panel_idx: int, xlabel: str, ylabel: str, s: dict,
+              n_panels: int = None):
+    is_left, is_bottom = panel_axis_flags(s, panel_idx, n_panels)
     fontsize = s['fontsize']
     box_lw = s.get('box_linewidth', 1.0)
     box_color = s.get('box_color', '#000000')
@@ -4152,11 +4402,14 @@ def _style_ax(ax, is_left: bool, xlabel: str, ylabel: str, s: dict):
 
     ax.set_facecolor('white')
 
-    # Only the left-most panel carries Y tick labels (shared-Y look preserved).
+    # Only the left-most panel carries Y tick labels (shared-Y look preserved);
+    # stacked panels do the same along X, keeping numbers on the bottom one.
+    # The ticks themselves stay on every panel — only the numbers are dropped.
     ax.tick_params(axis='x', which='major', direction=tick_dir,
                    length=length, width=width, labelsize=fontsize, colors='black',
                    bottom=show_x, top=show_top,
-                   labelbottom=show_x, labeltop=False, pad=x_tick_pad)
+                   labelbottom=(show_x and is_bottom), labeltop=False,
+                   pad=x_tick_pad)
     ax.tick_params(axis='y', which='major', direction=tick_dir,
                    length=length, width=width, labelsize=fontsize, colors='black',
                    left=show_y, right=show_right,
@@ -4178,7 +4431,10 @@ def _style_ax(ax, is_left: bool, xlabel: str, ylabel: str, s: dict):
     else:
         ax.minorticks_off()
 
-    ax.set_xlabel(_mathify(xlabel), fontsize=fontsize, color='black', labelpad=7)
+    if is_bottom:
+        ax.set_xlabel(_mathify(xlabel), fontsize=fontsize, color='black', labelpad=7)
+    else:
+        ax.set_xlabel('')
     if is_left:
         ax.set_ylabel(_mathify(ylabel), fontsize=fontsize, color='black', labelpad=7)
     else:
@@ -4338,6 +4594,9 @@ def _plot_pl(axes: list, s: dict) -> int:
         panel = s['panel_data'][i]
         traces, failed = _load_traces(panel, smooth_window)
         total_failed += failed
+        # Normalizing against the plotted X range keeps noise or artifacts outside
+        # that range from taking the peak; None (auto X) means the whole trace.
+        window = panel_x_window(s, i)
         corrected = []
         for add_idx, (x, y, tr) in enumerate(traces):
             yc = _pl_trace_y(y, baseline_correct)
@@ -4345,7 +4604,7 @@ def _plot_pl(axes: list, s: dict) -> int:
             # captured before normalizing — otherwise every peak becomes 1.0.
             peak = float(np.max(yc)) if len(yc) else 0.0
             if normalize:
-                yc = normalize_xrd_intensity(yc)
+                yc = normalize_in_window(x, yc, window)
             corrected.append((x, yc, peak, tr, add_idx))
         # Plot order stays highest-peak-first so the gradient + z-order are unchanged.
         corrected.sort(key=lambda t: t[2], reverse=True)
@@ -4374,21 +4633,28 @@ def _plot_pl(axes: list, s: dict) -> int:
             ylabel = 'Baseline-corrected PL'
         else:
             ylabel = 'PL intensity'
-        _style_ax(ax, i == 0, 'Wavelength λ (nm)', ylabel, s)
+        _style_ax(ax, i, 'Wavelength λ (nm)', ylabel, s)
         _add_legend(ax, hs, ls, s, srcs)
         _panel_title(ax, i, s)
     return total_failed
 
 
 def _plot_absorbance(axes: list, s: dict) -> int:
-    ylabel = 'Absorbance (a.u.)'
+    normalize = s.get('abs_normalize', False)
+    ylabel = 'Normalized absorbance (a.u.)' if normalize else 'Absorbance (a.u.)'
     total_failed = 0
     smooth_window = s['smooth_amount'] if s.get('smooth_enabled') else 0
     for i, ax in enumerate(axes):
         panel = s['panel_data'][i]
         traces, failed = _load_traces(panel, smooth_window)
         total_failed += failed
-        with_pk = [(x, y, float(np.max(y)) if len(y) else 0.0, tr)
+        # Absorbance spectra often carry scatter or detector junk outside the
+        # plotted range; normalizing against that window keeps it from setting
+        # the scale. None (auto X) normalizes over the whole trace.
+        window = panel_x_window(s, i)
+        # The peak is read before normalizing so plot order stays true-intensity.
+        with_pk = [(x, normalize_in_window(x, y, window) if normalize else y,
+                    float(np.max(y)) if len(y) else 0.0, tr)
                    for x, y, tr in traces]
         with_pk.sort(key=lambda t: t[2], reverse=True)
 
@@ -4401,7 +4667,7 @@ def _plot_absorbance(axes: list, s: dict) -> int:
             ln._spectra_src = ('trace', tr.get('uid'))
             hs.append(ln); ls.append(tr['display_name']); srcs.append(('trace', tr.get('uid')))
 
-        _style_ax(ax, i == 0, 'Wavelength λ (nm)', ylabel, s)
+        _style_ax(ax, i, 'Wavelength λ (nm)', ylabel, s)
         _add_legend(ax, hs, ls, s, srcs)
         _panel_title(ax, i, s)
     return total_failed
@@ -4495,7 +4761,7 @@ def _plot_xrd(axes: list, s: dict) -> int:
 
         xlabel = 'd-spacing (Å)' if use_d else '2θ (°)'
         ylabel = 'log_{10}(Intensity)' if do_log else 'Intensity'
-        _style_ax(ax, i == 0, xlabel, ylabel, s)
+        _style_ax(ax, i, xlabel, ylabel, s)
         _add_legend(ax, hs, ls, s, srcs)
         _panel_title(ax, i, s)
         if use_d:
@@ -4575,7 +4841,7 @@ def _ta_symmetric_limit(z, percentile: float) -> float:
     return limit if np.isfinite(limit) and limit > 0 else 1.0
 
 
-def _plot_ta_map(fig, ax, ds: dict, s: dict, is_left: bool, idx: int):
+def _plot_ta_map(fig, ax, ds: dict, s: dict, idx: int):
     m = _ta_load(ds)
     if m is None:
         return 1
@@ -4592,13 +4858,13 @@ def _plot_ta_map(fig, ax, ds: dict, s: dict, is_left: bool, idx: int):
         bar = fig.colorbar(mesh, ax=ax)
         bar.set_label(TA_YLABEL_DELTA_A, fontsize=s['fontsize'])
         bar.ax.tick_params(labelsize=s['fontsize'])
-    _style_ax(ax, is_left, TA_XLABEL_DELAY, TA_XLABEL_WAVELENGTH, s)
+    _style_ax(ax, idx, TA_XLABEL_DELAY, TA_XLABEL_WAVELENGTH, s)
     _ta_apply_time_scale(ax, s, m.time_ps.min(), m.time_ps.max())
     _panel_title(ax, idx, s)
     return 0
 
 
-def _plot_ta_slices(ax, ds: dict, s: dict, is_left: bool, idx: int):
+def _plot_ta_slices(ax, ds: dict, s: dict, idx: int):
     """Manuscript panels a/b: fix the delay, scan wavelength.
 
     Each curve is ΔA averaged over a short delay window, coloured along viridis
@@ -4647,7 +4913,7 @@ def _plot_ta_slices(ax, ds: dict, s: dict, is_left: bool, idx: int):
             labels.append('UV-vis')
             sources.append(('ta_uvvis', 0))
 
-    _style_ax(ax, is_left, TA_XLABEL_WAVELENGTH, TA_YLABEL_DELTA_A, s)
+    _style_ax(ax, idx, TA_XLABEL_WAVELENGTH, TA_YLABEL_DELTA_A, s)
     _add_legend(ax, handles, labels, s, sources)
     _panel_title(ax, idx, s)
     return 0
@@ -4664,7 +4930,7 @@ def _ta_band_traces(m, s: dict):
     return high, low
 
 
-def _plot_ta_kinetics(ax, ds: dict, s: dict, is_left: bool, idx: int):
+def _plot_ta_kinetics(ax, ds: dict, s: dict, idx: int):
     """Manuscript panel d: fix the wavelength band, scan time."""
     m = _ta_load(ds)
     if m is None:
@@ -4694,7 +4960,7 @@ def _plot_ta_kinetics(ax, ds: dict, s: dict, is_left: bool, idx: int):
 
     ylabel = (r'$\Delta A$ (normalized)' if s.get('ta_normalize', True)
               else TA_YLABEL_DELTA_A)
-    _style_ax(ax, is_left, TA_XLABEL_DELAY, ylabel, s)
+    _style_ax(ax, idx, TA_XLABEL_DELAY, ylabel, s)
     _ta_apply_time_scale(ax, s, m.time_ps.min(), m.time_ps.max())
     _add_legend(ax, handles, labels, s, sources)
     _panel_title(ax, idx, s)
@@ -4742,14 +5008,14 @@ def _ta_tau_text(fit: dict) -> str:
             f"$\\tau_3$ = {fit['tau_long_ps']:.3g} ps{fixed}")
 
 
-def _plot_ta_sas(ax, ds: dict, s: dict, is_left: bool, idx: int):
+def _plot_ta_sas(ax, ds: dict, s: dict, idx: int):
     """Species-associated spectra: the amplitude of each fitted temporal
     component as a function of wavelength. Needs a fit to have been run."""
     fit = (s.get('ta_fits') or {}).get(ds.get('uid'))
     if not fit or not fit.get('success'):
         ax.text(0.5, 0.5, 'Run the global fit first', transform=ax.transAxes,
                 ha='center', va='center', fontsize=s['fontsize'], color='#777')
-        _style_ax(ax, is_left, TA_XLABEL_WAVELENGTH, 'Fitted amplitude (mOD)', s)
+        _style_ax(ax, idx, TA_XLABEL_WAVELENGTH, 'Fitted amplitude (mOD)', s)
         _panel_title(ax, idx, s)
         return 0
 
@@ -4770,7 +5036,7 @@ def _plot_ta_sas(ax, ds: dict, s: dict, is_left: bool, idx: int):
     if s.get('ta_zero_line', True):
         ax.axhline(0.0, linewidth=0.8, color='black', zorder=0)
 
-    _style_ax(ax, is_left, TA_XLABEL_WAVELENGTH, 'Fitted amplitude (mOD)', s)
+    _style_ax(ax, idx, TA_XLABEL_WAVELENGTH, 'Fitted amplitude (mOD)', s)
     _add_legend(ax, handles, labels, s, sources)
     _panel_title(ax, idx, s)
     return 0
@@ -4784,17 +5050,17 @@ def _plot_ta(fig, axes: list, s: dict) -> int:
         ds = datasets[i] if i < len(datasets) else None
         if not ds:
             # An empty panel is normal while a figure is being built up.
-            _style_ax(ax, i == 0, TA_XLABEL_DELAY, TA_YLABEL_DELTA_A, s)
+            _style_ax(ax, i, TA_XLABEL_DELAY, TA_YLABEL_DELTA_A, s)
             _panel_title(ax, i, s)
             continue
         if kind == 'map':
-            failed += _plot_ta_map(fig, ax, ds, s, i == 0, i)
+            failed += _plot_ta_map(fig, ax, ds, s, i)
         elif kind == 'slices':
-            failed += _plot_ta_slices(ax, ds, s, i == 0, i)
+            failed += _plot_ta_slices(ax, ds, s, i)
         elif kind == 'kinetics':
-            failed += _plot_ta_kinetics(ax, ds, s, i == 0, i)
+            failed += _plot_ta_kinetics(ax, ds, s, i)
         else:
-            failed += _plot_ta_sas(ax, ds, s, i == 0, i)
+            failed += _plot_ta_sas(ax, ds, s, i)
     return failed
 
 
@@ -4862,7 +5128,7 @@ def _plot_iv(fig: Figure, s: dict) -> int:
             handles.append(legend_line)
             labels.append(entry['name'])
 
-    _style_ax(ax, True, 'Voltage (V)', f'Current ({unit})', s)
+    _style_ax(ax, 0, 'Voltage (V)', f'Current ({unit})', s, n_panels=1)
     _add_legend(ax, handles, labels, s)
     ax.set_xlim(*_axis_limits_with_padding(all_voltage))
     ax.set_ylim(*_axis_limits_with_padding(all_current * scale))
@@ -4889,7 +5155,9 @@ def do_plot(fig: Figure, s: dict) -> str:
         return msg
 
     n = s['n_panels']
-    axes = fig.subplots(1, n, sharey=False)
+    vertical = s.get('panel_orientation', 'horizontal') == 'vertical'
+    # Panel 0 is the top one when stacked, the left-most one otherwise.
+    axes = fig.subplots(n, 1) if vertical else fig.subplots(1, n, sharey=False)
     if n == 1:
         axes = [axes]
 
@@ -4927,9 +5195,9 @@ def do_plot(fig: Figure, s: dict) -> str:
             total_w = min(total_w, max(0.02, right_rect - left))
         total_h = s.get('pa_height', 0.78)
         gap = s.get('panel_gap', 0.04)
-        pw = max(0.02, (total_w - (n - 1) * gap) / n)
-        for j, ax in enumerate(axes):
-            ax.set_position([left + j * (pw + gap), bottom, pw, total_h])
+        rects = panel_rects((left, bottom, total_w, total_h), n, gap, vertical)
+        for ax, rect in zip(axes, rects):
+            ax.set_position(list(rect))
     else:
         try:
             fig.tight_layout(pad=1.5, rect=[0, 0, right_rect, top_rect])
@@ -4937,33 +5205,37 @@ def do_plot(fig: Figure, s: dict) -> str:
             pass
         if n > 1:
             try:
-                fig.subplots_adjust(wspace=s.get('panel_wspace', 0.30))
+                # Same Panel gap control, applied along whichever axis stacks.
+                spacing = s.get('panel_wspace', 0.30)
+                if vertical:
+                    fig.subplots_adjust(hspace=spacing)
+                else:
+                    fig.subplots_adjust(wspace=spacing)
             except Exception:
                 pass
 
+    # panel_x_window is the same window the normalize options measure against,
+    # so what gets scaled and what gets shown can never disagree.
     reverse_x = s['plot_type'] == 'xrd' and s['xrd_d_spacing']
-    if s.get('separate_x_limits', False):
-        panel_limits = s.get('panel_x_limits', [])
-        for idx, ax in enumerate(axes):
-            limit_cfg = panel_limits[idx] if idx < len(panel_limits) else {}
-            if not limit_cfg.get('auto_x', False):
-                xmin = limit_cfg.get('x_min', s['x_min'])
-                xmax = limit_cfg.get('x_max', s['x_max'])
-                if reverse_x:
-                    ax.set_xlim(xmax, xmin)
-                else:
-                    ax.set_xlim(xmin, xmax)
-    elif not s['auto_x']:
-        for ax in axes:
-            if reverse_x:
-                ax.set_xlim(s['x_max'], s['x_min'])
-            else:
-                ax.set_xlim(s['x_min'], s['x_max'])
+    for idx, ax in enumerate(axes):
+        window = panel_x_window(s, idx)
+        if window is None:
+            continue          # auto X — matplotlib fits the data
+        xmin, xmax = window
+        if reverse_x:
+            ax.set_xlim(xmax, xmin)
+        else:
+            ax.set_xlim(xmin, xmax)
 
-    if not s['auto_y']:
-        for ax in axes:
-            ax.set_ylim(s['y_min'], s['y_max'])
-    elif s['share_y'] and n > 1:
+    for idx, ax in enumerate(axes):
+        window = panel_y_window(s, idx)
+        if window is not None:
+            ax.set_ylim(*window)
+
+    # Sharing Y only means anything while every panel is still auto-fitted —
+    # a panel with a range of its own has already said what it wants.
+    if (s['share_y'] and n > 1
+            and all(panel_y_window(s, i) is None for i in range(n))):
         lo = min(ax.get_ylim()[0] for ax in axes)
         hi = max(ax.get_ylim()[1] for ax in axes)
         if np.isfinite(lo) and np.isfinite(hi):
@@ -4974,14 +5246,14 @@ def do_plot(fig: Figure, s: dict) -> str:
     # Only the left panel carries Y numbers, so notation is applied there alone;
     # see _apply_y_notation for why the other panels must be left untouched.
     for idx, ax in enumerate(axes):
-        _apply_y_notation(ax, s, is_left=(idx == 0))
+        _apply_y_notation(ax, s, is_left=panel_axis_flags(s, idx)[0])
 
     if xrd_margin_labels:
-        _add_xrd_margin_labels(
-            fig,
-            axes[-1],
-            min_gap=s.get('xrd_margin_label_gap', 0.25),
-        )
+        # Side-by-side panels share one right margin, so only the last panel is
+        # labelled; stacked panels each have their own, so all of them are.
+        for ax in (axes if vertical else axes[-1:]):
+            _add_xrd_margin_labels(
+                fig, ax, min_gap=s.get('xrd_margin_label_gap', 0.25))
 
     fig.canvas.draw_idle()
 
@@ -5267,6 +5539,7 @@ class MainWindow(QMainWindow):
         self.figure_tab_bar.figure_selected.connect(self._switch_figure)
         self.figure_tab_bar.figure_add_requested.connect(self._on_add_figure)
         self.figure_tab_bar.figure_close_requested.connect(self._close_figure)
+        self.figure_tab_bar.figure_rename_requested.connect(self._rename_figure)
 
         self._status_message('Ready — add files to a panel and click Plot.')
         self._apply_accent(MODES[0]['accent'])
@@ -5322,6 +5595,37 @@ class MainWindow(QMainWindow):
         # while preserving the previous figure's traces.
         idx = self._add_figure_state(mode=self._current_mode)
         self._switch_figure(idx)
+
+    def _ask_figure_name(self, current: str):
+        """Prompt for a figure tab name. Returns the trimmed name, or None if
+        the dialog was cancelled. Split out so the rename itself is testable
+        without a modal."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Rename Figure')
+        dlg.setMinimumWidth(s(300))
+        form = QFormLayout(dlg)
+        form.setSpacing(s(10))
+        edit = QLineEdit(current)
+        edit.selectAll()
+        form.addRow('Name', edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return edit.text().strip()
+
+    def _rename_figure(self, idx: int):
+        if idx < 0 or idx >= len(self._figure_states):
+            return
+        state = self._figure_states[idx]
+        name = self._ask_figure_name(state.label)
+        if not name:
+            return          # cancelled, or an empty name that would blank the tab
+        state.label = name
+        self.figure_tab_bar.set_label(idx, name)
 
     def _close_figure(self, idx: int):
         if len(self._figure_states) <= 1:

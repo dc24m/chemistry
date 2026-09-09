@@ -28,8 +28,25 @@ Built with Python, PyQt6, and Matplotlib.
 
 ### Multi-panel layout
 - Up to **5 simultaneous panels** per figure, configurable gap
-- Per-panel or shared X and Y limits
+- **Horizontal** (side by side) or **vertical** (stacked) panel layout
+  - Stacked panels put the X numbers and axis label on the bottom panel only and give
+    every panel its own Y label — the mirror of the side-by-side behavior, which keeps
+    Y numbers on the left panel alone
+  - Panels with their own X limits always keep their own X numbers, stacked or not
+- Per-panel or shared X and Y limits — **Use separate X / Y limits per panel** gives each
+  panel its own range (or its own auto-fit), so panels holding data on very different
+  scales can each be framed sensibly. Share Y is greyed out while separate Y limits are on
 - Auto-fit X/Y or manual entry
+
+### Normalization
+- PL and Absorbance both offer **Normalize (0–1)**, which scales each trace to its
+  peak **inside the plotted X range** — noise, scatter, or a detector artifact outside
+  that range can't take the peak and flatten everything you actually wanted to see
+- Each panel normalizes against its own window when per-panel X limits are on
+- Under Auto X the whole trace is used; a window containing no data points falls back
+  to the full range rather than blanking the trace
+- Points outside the window are scaled by the same factor rather than clipped, so they
+  stay on the plot (and may sit above 1)
 
 ### Trace customization
 - Per-trace display name, color, line width override, line style (solid / dashed / dotted / dash-dot), and visibility toggle
@@ -37,6 +54,8 @@ Built with Python, PyQt6, and Matplotlib.
 - Double-click any trace row to open the trace editor dialog
 
 ### Interactive figure editing
+- **Double-click a figure tab** to rename it (multiple figures live side by side in the
+  top tab bar, each with its own data and style)
 - **Drag** titles, axis labels, subtitles, and the legend to reposition them
 - **Double-click** any text artist to edit content, font size, color, bold/italic
 - **Double-click** the legend to edit its frame (edge color/width, fill, opacity)

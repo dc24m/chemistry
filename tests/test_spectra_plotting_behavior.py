@@ -40,6 +40,11 @@ def base_settings(**overrides):
         "auto_y": True,
         "y_min": 0.0,
         "y_max": 1.0,
+        "separate_y_limits": False,
+        "panel_y_limits": [
+            {"auto_y": False, "y_min": -1.0, "y_max": 5.0},
+            {"auto_y": False, "y_min": 100.0, "y_max": 200.0},
+        ],
         "share_y": False,
         "show_main_title": False,
         "main_title": "",
@@ -193,6 +198,368 @@ class SpectraPlottingBehaviorTest(unittest.TestCase):
             ))
 
             self.assertEqual(fig.axes[0].lines[0].get_ydata().tolist(), [5.0, 7.0, 4.0])
+
+    # ── Per-panel Y limits ───────────────────────────────────────────────────
+
+    def _pl_panels(self, path, n=2):
+        panel = {
+            "traces": [{
+                "path": str(path),
+                "display_name": "trace",
+                "color": "#000000",
+                "visible": True,
+                "use_auto_gradient_color": False,
+            }],
+            "gradient": ("#000000", "#000000"),
+            "use_gradient": False,
+        }
+        return [dict(panel) for _ in range(n)]
+
+    def test_panel_y_window_is_none_for_both_auto_y_paths(self):
+        self.assertIsNone(spectra_app.panel_y_window(
+            base_settings(auto_y=True), 0))
+        self.assertIsNone(spectra_app.panel_y_window(
+            base_settings(
+                separate_y_limits=True,
+                panel_y_limits=[{"auto_y": True, "y_min": 1.0, "y_max": 2.0}]),
+            0))
+
+    def test_panel_y_window_reports_configured_range_per_panel(self):
+        s = base_settings(separate_y_limits=True)
+        self.assertEqual(spectra_app.panel_y_window(s, 0), (-1.0, 5.0))
+        self.assertEqual(spectra_app.panel_y_window(s, 1), (100.0, 200.0))
+        self.assertEqual(
+            spectra_app.panel_y_window(base_settings(auto_y=False), 0), (0.0, 1.0))
+
+    def test_per_panel_y_limits_apply_independently(self):
+        fig = Figure()
+
+        spectra_app.do_plot(fig, base_settings(separate_y_limits=True))
+
+        self.assertEqual([ax.get_ylim() for ax in fig.axes],
+                         [(-1.0, 5.0), (100.0, 200.0)])
+
+    def test_a_panel_marked_auto_keeps_its_own_fit_while_its_neighbour_is_pinned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pl.csv"
+            path.write_text("400,0\n500,4\n600,2\n", encoding="utf-8")
+            fig = Figure()
+
+            spectra_app.do_plot(fig, base_settings(
+                panel_data=self._pl_panels(path),
+                pl_baseline_correct=False,
+                separate_y_limits=True,
+                panel_y_limits=[
+                    {"auto_y": False, "y_min": -10.0, "y_max": 10.0},
+                    {"auto_y": True, "y_min": 0.0, "y_max": 1.0},
+                ],
+            ))
+
+            pinned, auto = (ax.get_ylim() for ax in fig.axes)
+            self.assertEqual(pinned, (-10.0, 10.0))
+            self.assertNotEqual(auto, (-10.0, 10.0))
+            # Auto-fitted around the 0–4 data rather than the pinned range.
+            self.assertLess(auto[0], 1.0)
+            self.assertLess(auto[1], 6.0)
+
+    def test_global_y_limits_still_apply_to_every_panel(self):
+        fig = Figure()
+
+        spectra_app.do_plot(fig, base_settings(
+            auto_y=False, y_min=2.0, y_max=8.0))
+
+        self.assertEqual([ax.get_ylim() for ax in fig.axes], [(2.0, 8.0), (2.0, 8.0)])
+
+    def test_share_y_still_unifies_auto_fitted_panels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            small = Path(tmp) / "small.csv"
+            big = Path(tmp) / "big.csv"
+            small.write_text("400,0\n500,1\n", encoding="utf-8")
+            big.write_text("400,0\n500,50\n", encoding="utf-8")
+            fig = Figure()
+
+            panels = self._pl_panels(small)
+            panels[1] = dict(panels[1])
+            panels[1]["traces"] = [dict(panels[1]["traces"][0], path=str(big))]
+            spectra_app.do_plot(fig, base_settings(
+                panel_data=panels, share_y=True, auto_y=True))
+
+            a, b = (ax.get_ylim() for ax in fig.axes)
+            self.assertEqual(a, b)
+
+    def test_share_y_is_skipped_once_a_panel_pins_its_own_range(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pl.csv"
+            path.write_text("400,0\n500,4\n", encoding="utf-8")
+            fig = Figure()
+
+            spectra_app.do_plot(fig, base_settings(
+                panel_data=self._pl_panels(path),
+                share_y=True,
+                separate_y_limits=True,
+                panel_y_limits=[
+                    {"auto_y": False, "y_min": -10.0, "y_max": 10.0},
+                    {"auto_y": True, "y_min": 0.0, "y_max": 1.0},
+                ],
+            ))
+
+            pinned, auto = (ax.get_ylim() for ax in fig.axes)
+            self.assertEqual(pinned, (-10.0, 10.0))
+            self.assertNotEqual(auto, pinned)
+
+    # ── Panel orientation ────────────────────────────────────────────────────
+
+    def test_panel_rects_splits_a_box_left_to_right_by_default(self):
+        rects = spectra_app.panel_rects((0.1, 0.2, 0.8, 0.6), 2, 0.1, vertical=False)
+
+        self.assertEqual(rects, [(0.1, 0.2, 0.35000000000000003, 0.6),
+                                 (0.55, 0.2, 0.35000000000000003, 0.6)])
+
+    def test_panel_rects_stacks_panel_zero_on_top_when_vertical(self):
+        rects = spectra_app.panel_rects((0.1, 0.2, 0.8, 0.6), 3, 0.06, vertical=True)
+
+        # Same column, equal heights, panel 0 highest, gaps in between.
+        self.assertEqual([r[0] for r in rects], [0.1, 0.1, 0.1])
+        self.assertEqual([r[2] for r in rects], [0.8, 0.8, 0.8])
+        heights = [r[3] for r in rects]
+        self.assertTrue(all(abs(h - heights[0]) < 1e-12 for h in heights))
+        tops = [r[1] for r in rects]
+        self.assertTrue(tops[0] > tops[1] > tops[2])
+        self.assertAlmostEqual(tops[2], 0.2)
+        self.assertAlmostEqual(tops[0] + heights[0], 0.8)
+        self.assertAlmostEqual(tops[1] + heights[1] + 0.06, tops[0])
+
+    def test_panel_rects_gives_a_single_panel_the_whole_box(self):
+        box = (0.1, 0.2, 0.8, 0.6)
+        self.assertEqual(spectra_app.panel_rects(box, 1, 0.05, vertical=True), [box])
+        self.assertEqual(spectra_app.panel_rects(box, 1, 0.05, vertical=False), [box])
+
+    def test_panels_stay_side_by_side_when_no_orientation_is_set(self):
+        fig = Figure()
+
+        spectra_app.do_plot(fig, base_settings())
+
+        a, b = (ax.get_position() for ax in fig.axes)
+        self.assertAlmostEqual(a.y0, b.y0)
+        self.assertLess(a.x0, b.x0)
+
+    def test_vertical_orientation_stacks_panels_with_panel_zero_on_top(self):
+        fig = Figure()
+
+        spectra_app.do_plot(fig, base_settings(panel_orientation="vertical"))
+
+        a, b = (ax.get_position() for ax in fig.axes)
+        self.assertAlmostEqual(a.x0, b.x0)
+        self.assertAlmostEqual(a.width, b.width)
+        self.assertGreater(a.y0, b.y0)
+
+    def test_vertical_orientation_labels_x_on_the_bottom_panel_only(self):
+        fig = Figure()
+
+        spectra_app.do_plot(fig, base_settings(panel_orientation="vertical"))
+
+        top, bottom = fig.axes
+        self.assertEqual(top.get_xlabel(), "")
+        self.assertEqual(bottom.get_xlabel(), "Wavelength λ (nm)")
+        self.assertTrue(all(not t.get_visible() for t in top.get_xticklabels()))
+        self.assertTrue(any(t.get_visible() for t in bottom.get_xticklabels()))
+
+    def test_vertical_orientation_labels_y_on_every_panel(self):
+        fig = Figure()
+
+        spectra_app.do_plot(fig, base_settings(panel_orientation="vertical"))
+
+        for ax in fig.axes:
+            self.assertEqual(ax.get_ylabel(), "Baseline-corrected PL")
+            self.assertTrue(any(t.get_visible() for t in ax.get_yticklabels()))
+
+    def test_horizontal_orientation_keeps_x_on_all_and_y_on_the_left(self):
+        fig = Figure()
+
+        spectra_app.do_plot(fig, base_settings())
+
+        left, right = fig.axes
+        self.assertEqual(left.get_xlabel(), "Wavelength λ (nm)")
+        self.assertEqual(right.get_xlabel(), "Wavelength λ (nm)")
+        self.assertEqual(left.get_ylabel(), "Baseline-corrected PL")
+        self.assertEqual(right.get_ylabel(), "")
+
+    def test_vertical_orientation_keeps_x_labels_when_panels_have_own_limits(self):
+        fig = Figure()
+
+        spectra_app.do_plot(fig, base_settings(
+            panel_orientation="vertical", separate_x_limits=True))
+
+        for ax in fig.axes:
+            self.assertEqual(ax.get_xlabel(), "Wavelength λ (nm)")
+            self.assertTrue(any(t.get_visible() for t in ax.get_xticklabels()))
+
+    def test_manual_layout_stacks_panels_inside_the_plot_box(self):
+        fig = Figure()
+
+        spectra_app.do_plot(fig, base_settings(
+            panel_orientation="vertical", manual_layout=True,
+            pa_left=0.1, pa_bottom=0.2, pa_width=0.8, pa_height=0.6,
+            panel_gap=0.04,
+        ))
+
+        top, bottom = (ax.get_position() for ax in fig.axes)
+        self.assertAlmostEqual(top.x0, 0.1)
+        self.assertAlmostEqual(top.width, 0.8)
+        self.assertAlmostEqual(bottom.y0, 0.2)
+        self.assertAlmostEqual(top.y1, 0.8)
+        self.assertAlmostEqual(bottom.y1 + 0.04, top.y0)
+
+    def test_iv_keeps_its_axis_labels_regardless_of_orientation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            neg = Path(tmp) / "device_under25.csv"
+            pos = Path(tmp) / "device_under5.csv"
+            neg.write_text("0,0,-20,1e-6\n0,0,0,3e-6\n", encoding="utf-8")
+            pos.write_text("0,0,0,4e-6\n0,0,20,6e-6\n", encoding="utf-8")
+            fig = Figure()
+
+            spectra_app.do_plot(fig, base_settings(
+                plot_type="iv", n_panels=3, panel_orientation="vertical",
+                iv_sets=[{
+                    "name": "Device A",
+                    "color": "#0072B2",
+                    "neg_path": str(neg),
+                    "pos_path": str(pos),
+                }],
+            ))
+
+            ax = fig.axes[0]
+            self.assertEqual(ax.get_xlabel(), "Voltage (V)")
+            self.assertEqual(ax.get_ylabel(), "Current (µA)")
+
+    # ── Window-relative normalization ────────────────────────────────────────
+
+    def _one_panel(self, path):
+        return [{
+            "traces": [{
+                "path": str(path),
+                "display_name": "trace",
+                "color": "#000000",
+                "visible": True,
+                "use_auto_gradient_color": False,
+            }],
+            "gradient": ("#000000", "#000000"),
+            "use_gradient": False,
+        }]
+
+    def test_panel_x_window_is_none_for_both_auto_x_paths(self):
+        self.assertIsNone(spectra_app.panel_x_window(
+            base_settings(auto_x=True), 0))
+        self.assertIsNone(spectra_app.panel_x_window(
+            base_settings(
+                separate_x_limits=True,
+                panel_x_limits=[{"auto_x": True, "x_min": 1.0, "x_max": 2.0}]),
+            0))
+
+    def test_panel_x_window_reports_configured_range_per_panel(self):
+        s = base_settings(separate_x_limits=True)
+        self.assertEqual(spectra_app.panel_x_window(s, 0), (10.0, 20.0))
+        self.assertEqual(spectra_app.panel_x_window(s, 1), (30.0, 40.0))
+        self.assertEqual(spectra_app.panel_x_window(base_settings(), 0), (1.0, 2.0))
+
+    def test_absorbance_normalize_scales_to_the_peak_inside_the_x_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "abs.csv"
+            # 900 nm carries a noise spike well outside the plotted window.
+            path.write_text("400,1\n500,2\n600,1\n900,50\n", encoding="utf-8")
+            fig = Figure()
+
+            spectra_app.do_plot(fig, base_settings(
+                plot_type="absorbance", n_panels=1,
+                panel_data=self._one_panel(path),
+                auto_x=False, x_min=400.0, x_max=600.0,
+                abs_normalize=True,
+            ))
+
+            y = fig.axes[0].lines[0].get_ydata().tolist()
+            self.assertEqual(y, [0.5, 1.0, 0.5, 25.0])
+            self.assertEqual(fig.axes[0].get_ylabel(), "Normalized absorbance (a.u.)")
+
+    def test_absorbance_normalize_off_leaves_data_and_label_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "abs.csv"
+            path.write_text("400,1\n500,2\n600,1\n", encoding="utf-8")
+            fig = Figure()
+
+            spectra_app.do_plot(fig, base_settings(
+                plot_type="absorbance", n_panels=1,
+                panel_data=self._one_panel(path),
+                auto_x=False, x_min=400.0, x_max=600.0,
+                abs_normalize=False,
+            ))
+
+            self.assertEqual(fig.axes[0].lines[0].get_ydata().tolist(), [1.0, 2.0, 1.0])
+            self.assertEqual(fig.axes[0].get_ylabel(), "Absorbance (a.u.)")
+
+    def test_absorbance_normalize_uses_each_panels_own_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "abs.csv"
+            path.write_text("10,1\n20,4\n30,2\n40,8\n", encoding="utf-8")
+            fig = Figure()
+
+            panel = self._one_panel(path)
+            spectra_app.do_plot(fig, base_settings(
+                plot_type="absorbance", n_panels=2,
+                panel_data=panel + [dict(panel[0])],
+                separate_x_limits=True,
+                abs_normalize=True,
+            ))
+
+            # Panel 1 sees 10–20 (max 4), panel 2 sees 30–40 (max 8).
+            self.assertEqual(fig.axes[0].lines[0].get_ydata().tolist(),
+                             [0.25, 1.0, 0.5, 2.0])
+            self.assertEqual(fig.axes[1].lines[0].get_ydata().tolist(),
+                             [0.125, 0.5, 0.25, 1.0])
+
+    def test_absorbance_normalize_falls_back_to_full_range_for_an_empty_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "abs.csv"
+            path.write_text("400,1\n500,2\n600,1\n", encoding="utf-8")
+            fig = Figure()
+
+            spectra_app.do_plot(fig, base_settings(
+                plot_type="absorbance", n_panels=1,
+                panel_data=self._one_panel(path),
+                auto_x=False, x_min=1000.0, x_max=1200.0,
+                abs_normalize=True,
+            ))
+
+            self.assertEqual(fig.axes[0].lines[0].get_ydata().tolist(), [0.5, 1.0, 0.5])
+
+    def test_pl_normalize_scales_to_the_peak_inside_the_x_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pl.csv"
+            path.write_text("400,0\n500,4\n600,2\n900,40\n", encoding="utf-8")
+            fig = Figure()
+
+            spectra_app.do_plot(fig, base_settings(
+                n_panels=1, panel_data=self._one_panel(path),
+                auto_x=False, x_min=400.0, x_max=600.0,
+                pl_baseline_correct=False, pl_normalize=True,
+            ))
+
+            self.assertEqual(fig.axes[0].lines[0].get_ydata().tolist(),
+                             [0.0, 1.0, 0.5, 10.0])
+
+    def test_pl_normalize_under_auto_x_still_uses_the_whole_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pl.csv"
+            path.write_text("400,0\n500,4\n600,2\n900,40\n", encoding="utf-8")
+            fig = Figure()
+
+            spectra_app.do_plot(fig, base_settings(
+                n_panels=1, panel_data=self._one_panel(path),
+                auto_x=True,
+                pl_baseline_correct=False, pl_normalize=True,
+            ))
+
+            self.assertEqual(fig.axes[0].lines[0].get_ydata().tolist(),
+                             [0.0, 0.1, 0.05, 1.0])
 
     def test_xrd_margin_labels_match_rightmost_trace_names_and_colors(self):
         with tempfile.TemporaryDirectory() as tmp:

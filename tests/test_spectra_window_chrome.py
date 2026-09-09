@@ -89,3 +89,76 @@ class WindowChromeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FigureTabRenameTest(unittest.TestCase):
+    def test_set_label_renames_a_tab_without_touching_its_neighbours(self):
+        qapp()
+        bar = spectra_app.FigureTabBar()
+        bar.add_figure("Fig 1")
+        bar.add_figure("Fig 2")
+
+        bar.set_label(0, "Emission")
+
+        self.assertEqual([bar.label(i) for i in range(2)], ["Emission", "Fig 2"])
+
+    def test_double_click_requests_a_rename_for_that_tab(self):
+        qapp()
+        bar = spectra_app.FigureTabBar()
+        bar.add_figure("Fig 1")
+        bar.add_figure("Fig 2")
+        seen = []
+        bar.figure_rename_requested.connect(seen.append)
+
+        bar._slots[1][0].doubleClicked.emit()
+
+        self.assertEqual(seen, [1])
+
+    def test_rename_targets_the_right_tab_after_one_is_closed(self):
+        qapp()
+        bar = spectra_app.FigureTabBar()
+        for label in ("Fig 1", "Fig 2", "Fig 3"):
+            bar.add_figure(label)
+        seen = []
+        bar.figure_rename_requested.connect(seen.append)
+
+        bar.remove_figure(0)
+        bar._slots[1][0].doubleClicked.emit()   # was index 2 before the close
+
+        self.assertEqual(seen, [1])
+        self.assertEqual([bar.label(i) for i in range(2)], ["Fig 2", "Fig 3"])
+
+    def test_window_rename_updates_both_the_state_and_the_tab(self):
+        qapp()
+        win = spectra_app.MainWindow()
+        win._ask_figure_name = lambda current: "Sample A"
+
+        win._rename_figure(0)
+
+        self.assertEqual(win._figure_states[0].label, "Sample A")
+        self.assertEqual(win.figure_tab_bar.label(0), "Sample A")
+
+    def test_window_rename_ignores_a_cancelled_or_empty_name(self):
+        qapp()
+        win = spectra_app.MainWindow()
+        before = win._figure_states[0].label
+
+        win._ask_figure_name = lambda current: None      # cancelled
+        win._rename_figure(0)
+        win._ask_figure_name = lambda current: ""        # cleared the field
+        win._rename_figure(0)
+
+        self.assertEqual(win._figure_states[0].label, before)
+        self.assertEqual(win.figure_tab_bar.label(0), before)
+
+    def test_rename_prompt_is_seeded_with_the_current_label(self):
+        qapp()
+        win = spectra_app.MainWindow()
+        win.figure_tab_bar.set_label(0, "Emission")
+        win._figure_states[0].label = "Emission"
+        seen = []
+        win._ask_figure_name = lambda current: seen.append(current)
+
+        win._rename_figure(0)
+
+        self.assertEqual(seen, ["Emission"])
