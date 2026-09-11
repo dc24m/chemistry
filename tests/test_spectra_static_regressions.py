@@ -51,11 +51,12 @@ class SpectraStaticRegressionTest(unittest.TestCase):
         self.assertIn("setObjectName('canvasCard')", source)
         self.assertIn("add_shadow(self.card", source)
 
-    def test_main_window_attaches_bottom_dock_groups(self):
+    def test_main_window_uses_workspace_arrangement(self):
         source = SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("take_dock_groups()", source)
-        self.assertIn("setObjectName(\"dock_style\")", source)
+        self.assertIn("arrange_workspace(self, lay", source)
+        self.assertIn("setObjectName('dock_build')", source)
+        self.assertNotIn("setObjectName(\"dock_style\")", source)
 
     def test_trace_color_fallbacks_are_black(self):
         source = SOURCE.read_text(encoding="utf-8")
@@ -132,19 +133,15 @@ class SpectraStaticRegressionTest(unittest.TestCase):
         self.assertNotIn("self.controls.spin_fw.valueChanged.connect(self._update_canvas_size)", source)
         self.assertNotIn("self.controls.spin_fh.valueChanged.connect(self._update_canvas_size)", source)
 
-    def test_selected_tabs_use_neutral_graphite_chrome(self):
+    def test_selected_tabs_use_neutral_chrome(self):
         # QSS rules moved to spectra_theme; search both files
         source = SOURCE.read_text(encoding="utf-8") + THEME.read_text(encoding="utf-8")
 
-        self.assertIn("QPushButton#headerTab:checked", source)
         self.assertIn("QTabBar::tab:selected", source)
-        header_block = source.split("QPushButton#headerTab:checked {{", 1)[1].split("}}", 1)[0]
         tab_block = source.split("QTabBar::tab:selected {{", 1)[1].split("}}", 1)[0]
-        self.assertIn("background: {PRIMARY};", header_block)
-        self.assertIn("background: {PRIMARY};", tab_block)
-        self.assertNotIn("background: {ACCENT};", header_block)
+        self.assertIn("background: {BG};", tab_block)
+        self.assertIn("border-bottom-color: {PRIMARY};", tab_block)
         self.assertNotIn("background: {ACCENT};", tab_block)
-        self.assertNotIn("border-color: {ACCENT};", header_block)
         self.assertNotIn("border-color: {ACCENT};", tab_block)
 
     def test_figure_tabs_use_centered_light_selected_state(self):
@@ -162,8 +159,8 @@ class SpectraStaticRegressionTest(unittest.TestCase):
         source = SOURCE.read_text(encoding="utf-8")
         refresh_block = source.split("def _refresh(self):", 1)[1].split("def _pick(self):", 1)[0]
 
-        self.assertIn("min-height:26px", refresh_block)
-        self.assertIn("max-height:26px", refresh_block)
+        self.assertIn("min-height:{s(26)}px", refresh_block)
+        self.assertIn("max-height:{s(26)}px", refresh_block)
         self.assertIn("border-radius:6px", refresh_block)
         self.assertNotIn("min-height:32px", refresh_block)
 
@@ -171,7 +168,7 @@ class SpectraStaticRegressionTest(unittest.TestCase):
         source = SOURCE.read_text(encoding="utf-8")
         import_block = source.split("try:", 1)[1].split("except ModuleNotFoundError", 1)[0]
 
-        for name in ("QSplitter", "QGridLayout", "QEvent", "QSettings", "QByteArray"):
+        for name in ("QSplitter", "QGridLayout", "QSettings", "QByteArray"):
             self.assertNotIn(name, import_block)
 
     def test_control_panel_does_not_keep_noop_accent_hook(self):

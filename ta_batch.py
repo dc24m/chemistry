@@ -25,7 +25,6 @@ import csv
 import json
 import os
 import re
-import sys
 import traceback
 
 import numpy as np

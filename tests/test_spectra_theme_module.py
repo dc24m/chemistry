@@ -34,6 +34,19 @@ class ThemeModuleTest(unittest.TestCase):
         self.assertEqual(after.hits, before.hits + 1)
         self.assertEqual(after.misses, before.misses)
 
+    def test_chrome_states_are_visible_and_accented(self):
+        import spectra_theme
+        accent = spectra_theme.MODES[2]["accent"]  # XRD violet
+        for dark in (False, True):
+            qss = spectra_theme.build_style(accent, dark=dark)
+            # checked checkbox fills with the mode accent; unchecked has an outline
+            self.assertIn(f"QCheckBox::indicator:checked {{ background: {accent};", qss)
+            self.assertRegex(qss, r"QCheckBox::indicator \{[^}]*border: 1px solid")
+            # an expanded section header must not sit on the generic :checked hover fill
+            self.assertIn("QToolButton#sectionToggle:checked { background: transparent; }", qss)
+            # the active mode button is the one place the accent tints a fill
+            self.assertRegex(qss, r"QPushButton#headerTab:checked \{[^}]*rgba\(")
+
 
 if __name__ == "__main__":
     unittest.main()

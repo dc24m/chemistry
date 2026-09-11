@@ -27,8 +27,11 @@ class WindowChromeTest(unittest.TestCase):
             self.assertIn(expected, menu_titles)
         self.assertIsInstance(win.header, spectra_app.TopHeader)
         self.assertTrue(win.header.isVisible())
-        for key in ("pl", "absorbance", "xrd", "iv"):
-            self.assertIn(key, win.header.mode_tabs.buttons)
+        buttons = win.header.mode_tabs.buttons
+        self.assertEqual(list(buttons), [mode['key'] for mode in spectra_app.MODES])
+        self.assertEqual([b.text() for b in buttons.values()],
+                         [mode['label'] for mode in spectra_app.MODES])
+        self.assertTrue(buttons[spectra_app.MODES[0]['key']].isChecked())
         self.assertIsInstance(win.statusBar(), QStatusBar)
 
     def test_toolbar_plot_action_triggers_plot(self):
@@ -47,44 +50,40 @@ class WindowChromeTest(unittest.TestCase):
         self.assertEqual(win.header.mode_tabs.current(), "xrd")
         self.assertTrue(win.header.mode_tabs.buttons["xrd"].isChecked())
 
-    def test_header_tabs_switch_control_panel_mode(self):
+    def test_header_selector_switches_control_panel_mode(self):
         qapp()
         win = spectra_app.MainWindow()
         win.header.mode_tabs.buttons["absorbance"].click()
         self.assertEqual(win.controls.current_mode(), "absorbance")
         self.assertTrue(win.mode_actions["absorbance"].isChecked())
 
-    def test_core_panels_are_dock_widgets(self):
+    def test_workspace_is_the_only_dock_widget(self):
         from PyQt6.QtWidgets import QDockWidget
         qapp()
         win = spectra_app.MainWindow()
         names = {d.objectName() for d in win.findChildren(QDockWidget)}
-        self.assertIn("dock_build", names)
-        self.assertIn("dock_style", names)
-        self.assertIn("dock_log", names)
-        self.assertNotIn("dock_layers", names)
+        self.assertEqual(names, {"dock_build"})
         self.assertIs(win.canvas.parent(), win.canvas_stack)
         self.assertIs(win.canvas_stack.parent(), win.app_root)
         self.assertIsNotNone(win._default_state)
 
-    def test_plot_style_dock_launches_wide_enough_for_controls(self):
+    def test_workspace_dock_launches_wide_enough_for_controls(self):
         qapp()
         win = spectra_app.MainWindow()
         win.show()
         QApplication.processEvents()
         QApplication.processEvents()
 
-        self.assertGreaterEqual(win.dock_style.width(), 360)
+        self.assertGreaterEqual(win.dock_build.width(), 320)
 
     def test_view_menu_lists_dock_toggles(self):
         qapp()
         win = spectra_app.MainWindow()
         view_actions = [a.text() for a in win.m_view.actions()]
         joined = " ".join(view_actions)
-        self.assertIn("Build", joined)
-        self.assertIn("Plot Style", joined)
-        self.assertIn("Log", joined)
-        self.assertNotIn("Layers", joined)
+        self.assertIn("Workspace", joined)
+        self.assertNotIn("Plot Style", joined)
+        self.assertNotIn("Log", joined)
 
 
 if __name__ == "__main__":

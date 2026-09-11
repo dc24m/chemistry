@@ -16,19 +16,18 @@ def qapp():
     return _APP
 
 
-class AuxDockTest(unittest.TestCase):
-    def test_log_dock_exists_without_unfinished_layers_pane(self):
+class WorkspaceDockTest(unittest.TestCase):
+    def test_single_workspace_dock_replaces_auxiliary_panes(self):
         qapp()
         win = spectra_app.MainWindow()
         names = {d.objectName() for d in win.findChildren(QDockWidget)}
-        self.assertIn("dock_log", names)
-        self.assertNotIn("dock_layers", names)
+        self.assertEqual(names, {"dock_build"})
 
-    def test_log_appends_status_messages(self):
+    def test_status_messages_use_the_native_status_bar(self):
         qapp()
         win = spectra_app.MainWindow()
         win._status_message("Hello log")
-        self.assertIn("Hello log", win.log_dock.text())
+        self.assertEqual(win.statusBar().currentMessage(), "Hello log")
 
     def test_window_does_not_expose_layers_panel_api(self):
         qapp()

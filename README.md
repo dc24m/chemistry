@@ -160,7 +160,6 @@ ta_data.py              — transient-absorption parsing, slicing, and kinetic f
 ta_batch.py             — CLI that batch-analyzes a folder of TA .dat files
 requirements_spectra.txt
 assets/
-  logo.png              — header logo (optional; app starts without it)
   loading.png           — loading screen artwork
   screenshots/          — README screenshots generated from the current UI
 tests/
@@ -251,7 +250,7 @@ turned into a short trace label. Unrecognised names still load, labelled by file
 
 ## Design
 
-SPECTRAplot follows a "monochrome instrument" design philosophy: white plotting surface, neutral gray chrome, and upright technical typography. The three mode colors (PL pink `#F472B6`, Absorbance blue `#38BDF8`, XRD violet `#A78BFA`) are reserved for plotted data only and never appear in UI chrome.
+SPECTRAplot follows a "monochrome instrument" design philosophy: white plotting surface, neutral gray chrome, and upright technical typography. The three mode colors (PL pink `#F472B6`, Absorbance blue `#38BDF8`, XRD violet `#A78BFA`) are reserved for plotted data; in the chrome they mark only the active mode button, checked checkboxes, and the selected list row.
 
 See [DESIGN.md](DESIGN.md) for the full design system and [PRODUCT.md](PRODUCT.md) for the product brief.
 

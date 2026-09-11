@@ -20,7 +20,6 @@ def spans_to_md(spans: list[dict], body_size: float) -> str:
         if not text.strip():
             parts.append(text)
             continue
-        size  = span["size"]
         flags = span["flags"]
         bold   = bool(flags & FLAG_BOLD)
         italic = bool(flags & FLAG_ITALIC)

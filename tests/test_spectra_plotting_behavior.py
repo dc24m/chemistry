@@ -606,6 +606,25 @@ class SpectraPlottingBehaviorTest(unittest.TestCase):
             self.assertEqual(labels["Blue phase"].get_color().lower(), "#0000ff")
             self.assertLess(fig.axes[0].get_position().x1, 0.96)
 
+    def test_xrd_reference_scale_and_offset_apply_before_stacking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ref_path = Path(tmp) / "ref.xy"
+            ref_path.write_text("5 1\n10 2\n20 4\n", encoding="utf-8")
+            fig = Figure()
+
+            spectra_app.do_plot(fig, base_settings(
+                plot_type="xrd",
+                n_panels=1,
+                panel_data=[{"traces": [], "gradient": ("#000000", "#000000"),
+                             "use_gradient": False}],
+                xrd_ref_paths=[str(ref_path)],
+                xrd_ref_scales=[0.5],
+                xrd_ref_offsets=[10.0],
+            ))
+
+            # raw * 0.5 + 10; the stacking offset of the first trace is 0.
+            self.assertEqual(fig.axes[0].lines[0].get_ydata().tolist(), [10.5, 11.0, 12.0])
+
     def test_iv_files_sort_by_under_value_descending_with_missing_last(self):
         files = [
             "sample_under5.csv",

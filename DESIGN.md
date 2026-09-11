@@ -84,7 +84,7 @@ A restrained monochrome palette: pure white ground, two neutral surface depths, 
 
 **The Monochrome Chrome Rule.** App chrome uses only white, gray, and near-black. A control can be active, selected, or focused without changing hue.
 
-**The Data Color Fence.** PL Pink, Absorbance Blue, and XRD Violet are fenced to plotted traces and trace defaults. They do not appear as button fills, tab borders, progress bars, badge backgrounds, status indicators, or decorative accents.
+**The Data Color Fence.** The mode colors belong to plotted traces and trace defaults. In chrome they appear only where they state something: the active mode button's tint and border, a checked checkbox, the selected list row, and the Workspace dock's title rule. Never as solid button fills, tab borders, progress bars, badges, or decoration.
 
 ## 3. Typography
 
@@ -120,7 +120,7 @@ The system is flat by default. Depth is expressed through tonal layering: white 
 - **Do** hold the canvas background at exactly `#FFFFFF`.
 - **Do** use IBM Plex Mono for every measured scientific value.
 - **Do** keep active UI chrome monochrome: graphite fill, graphite border, or neutral hover.
-- **Do** restrict mode colors to trace identity and plot defaults.
+- **Do** restrict mode colors to trace identity, plot defaults, and the four state accents above.
 - **Do** keep transitions at 150-200ms ease-out. State changes only.
 - **Do** design interactive components with default, hover, focus, active, disabled, and loading states.
 - **Do** use sentence case for labels, buttons, and headings where product copy allows it.
@@ -130,7 +130,7 @@ The system is flat by default. Depth is expressed through tonal layering: white 
 - **Don't** build grid-heavy, spreadsheet-structured layouts. SPECTRAplot is not Excel.
 - **Don't** stack icon-heavy toolbars with unclear visual hierarchy.
 - **Don't** use pastel fills, large-radius pill buttons, playful micro-copy, or consumer SaaS softness.
-- **Don't** let mode colors appear in UI chrome. They are data colors, not interface accents.
+- **Don't** spread mode colors beyond those four state accents. They are data colors, not decoration.
 - **Don't** animate anything except state changes.
 - **Don't** use gradient text. One solid color per text node.
 - **Don't** render measured values in IBM Plex Sans.

@@ -8,9 +8,12 @@ import sys
 import os
 import re
 import json
-import time
 import uuid
 from dataclasses import dataclass
+
+# Matplotlib supports several Qt bindings. Import PyQt first so its QtAgg
+# widgets cannot be mixed with an already-installed PySide runtime.
+os.environ.setdefault('QT_API', 'pyqt6')
 
 
 def resource_path(*parts) -> str:
@@ -21,14 +24,6 @@ def resource_path(*parts) -> str:
 try:
     import numpy as np
 
-    import matplotlib
-    matplotlib.use('QtAgg')
-    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
-    from matplotlib.figure import Figure
-    from matplotlib.colors import to_rgb, to_hex
-    from matplotlib.ticker import ScalarFormatter, FuncFormatter
-    from matplotlib.patches import Rectangle
-
     from PyQt6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QLabel, QPushButton, QComboBox, QSpinBox, QDoubleSpinBox,
@@ -38,12 +33,20 @@ try:
         QSizePolicy, QDialog, QDialogButtonBox, QFormLayout,
         QButtonGroup, QSplashScreen, QProgressBar,
         QToolButton, QFrame, QSlider, QToolBar,
-        QDockWidget, QPlainTextEdit, QStackedWidget,
+        QDockWidget, QStackedWidget,
     )
     from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer, QEvent
-    from PyQt6.QtGui import (QFont, QColor, QCursor, QPixmap, QFontDatabase,
+    from PyQt6.QtGui import (QColor, QCursor, QPixmap, QFontDatabase,
                               QUndoStack, QUndoCommand, QKeySequence,
                               QAction, QActionGroup)
+
+    import matplotlib
+    matplotlib.use('QtAgg')
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+    from matplotlib.figure import Figure
+    from matplotlib.colors import to_rgb, to_hex
+    from matplotlib.ticker import ScalarFormatter, FuncFormatter
+    from matplotlib.patches import Rectangle
 except ModuleNotFoundError as exc:
     missing = exc.name or 'a required package'
     raise SystemExit(
@@ -54,9 +57,12 @@ except ModuleNotFoundError as exc:
     ) from exc
 
 import spectra_theme
+import spectra_documents
+from spectra_session import PresetLibrary, preset_from_snapshot
+from spectra_workspace import arrange_workspace
 import ta_data
 from spectra_theme import (
-    MODES, MODE_BY_KEY, darken, add_shadow, build_style, s, vs, init_ui_scale,
+    MODES, MODE_BY_KEY, add_shadow, build_style, s, vs, init_ui_scale,
     set_ui_font,
 )
 
@@ -73,7 +79,7 @@ matplotlib.rcParams.update({
 })
 
 
-_APP_DARK = False   # global dark-mode state toggled by the header button
+_APP_DARK = True    # global dark-mode state toggled by the header button
 
 
 
@@ -260,11 +266,6 @@ def choose_iv_current_unit(max_abs_current: float) -> tuple[float, str]:
     if max_abs_current < 1:
         return 1e3, 'mA'
     return 1.0, 'A'
-
-
-def clean_iv_label(path: str) -> str:
-    name = os.path.splitext(os.path.basename(path))[0]
-    return name.replace('_', ' ')
 
 
 def validate_iv_sets(iv_sets: list[dict]) -> str | None:
@@ -522,6 +523,9 @@ class FigureState:
     # Snapshot of the control panel's data inputs (traces, IV sweeps, XRD refs)
     # for this figure, so switching tabs restores what was loaded. None = empty.
     data:   dict = None
+    path:   str = None
+    sources: list = None
+    dirty:  bool = False
 
 
 class FigureTabButton(QPushButton):
@@ -634,153 +638,91 @@ class FigureTabBar(QWidget):
 
 
 class ModeTabBar(QWidget):
+    """One exclusive button per plot mode; the checked one carries the mode accent."""
     mode_changed = pyqtSignal(str)
-
-    # Hard per-tab minimum widths so long labels never clip, regardless of font.
-    _MIN_W = {'pl': 190, 'absorbance': 142, 'xrd': 78, 'iv': 96, 'ta': 132}
 
     def __init__(self, parent=None):
         super().__init__(parent)
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(s(6))
+        row.setSpacing(s(4))
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
-        self.buttons = {}
+        self.buttons: dict[str, QPushButton] = {}
         for m in MODES:
             b = QPushButton(m['label'])
             b.setObjectName('headerTab')
             b.setCheckable(True)
             b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            b.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-            # Use the larger of the spec floor and the measured text width so the
-            # label is guaranteed room with padding to spare.
-            floor = s(self._MIN_W.get(m['key'], 130))
-            measured = b.fontMetrics().horizontalAdvance(m['label']) + s(34)
-            b.setMinimumWidth(max(floor, measured))
-            b.setMinimumHeight(s(34))
+            b.setMinimumWidth(b.fontMetrics().horizontalAdvance(m['label']) + s(26))
             b.clicked.connect(lambda _, k=m['key']: self._select(k))
             self._group.addButton(b)
             self.buttons[m['key']] = b
             row.addWidget(b)
-        self.buttons[MODES[0]['key']].setChecked(True)
         self._current = MODES[0]['key']
+        self.buttons[self._current].setChecked(True)
 
     def _select(self, key: str):
-        if key in self.buttons:
-            self.buttons[key].setChecked(True)
         self._current = key
         self.mode_changed.emit(key)
 
     def set_current(self, key: str):
-        if key not in self.buttons:
-            return
-        self._current = key
-        self.buttons[key].setChecked(True)
+        if key in self.buttons:
+            self._current = key
+            self.buttons[key].setChecked(True)
 
     def current(self) -> str:
         return self._current
 
 
-# ── Top header bar ────────────────────────────────────────────────────────────
-
 class TopHeader(QWidget):
     mode_changed = pyqtSignal(str)
     theme_toggled = pyqtSignal(bool)
     plot_requested = pyqtSignal()
-
-    # Fallback font stack if Montserrat is unavailable
-    _TITLE_FF = "'Segoe UI Variable','Segoe UI','IBM Plex Sans','Inter',sans-serif"
+    presets_requested = pyqtSignal()
+    open_requested = pyqtSignal()
+    save_requested = pyqtSignal()
+    export_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('topHeader')
-        self.setFixedHeight(s(80))
-
+        self.setFixedHeight(52)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(s(14), 0, s(14), 0)
-        lay.setSpacing(0)
-
-        # ── Logo image (assets/logo.png, optional)
-        logo_path = resource_path('assets', 'logo.png')
-        if os.path.isfile(logo_path):
-            logo_lbl = QLabel()
-            logo_lbl.setObjectName('logoImg')
-            # Render at the screen's native pixel density so it stays crisp on Retina.
-            scr = QApplication.primaryScreen()
-            dpr = scr.devicePixelRatio() if scr else 1.0
-            pix = QPixmap(logo_path).scaled(
-                int(s(48) * dpr), int(s(48) * dpr),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation)
-            pix.setDevicePixelRatio(dpr)
-            logo_lbl.setPixmap(pix)
-            logo_lbl.setFixedSize(s(48), s(48))
-            lay.addWidget(logo_lbl)
-            lay.addSpacing(s(11))
-
-        # ── Brand block: SPECTRA + plot title over subtitle
-        brand = QWidget()
-        brand.setObjectName('brandBlock')
-        bcol = QVBoxLayout(brand)
-        bcol.setContentsMargins(0, 0, 0, 0)
-        bcol.setSpacing(0)
-
-        self._title_lbl = QLabel()
+        lay.setContentsMargins(12, 6, 12, 6)
+        lay.setSpacing(8)
+        self._title_lbl = QLabel('SPECTRAplot')
         self._title_lbl.setObjectName('appTitle')
-        self._title_lbl.setTextFormat(Qt.TextFormat.RichText)
-        self._title_lbl.setContentsMargins(0, 0, 0, 0)
-        self._set_title_colors('#171717', '#5F5F5F')
-        subtitle = QLabel('by Arnold Wijoyo')
-        subtitle.setObjectName('brandSub')
-        # Pull the byline up tight under the title.
-        subtitle.setContentsMargins(0, s(-4), 0, 0)
-
-        bcol.addStretch()
-        bcol.addWidget(self._title_lbl)
-        bcol.addWidget(subtitle)
-        bcol.addStretch()
-        lay.addWidget(brand)
-        lay.addSpacing(s(22))
-
+        lay.addWidget(self._title_lbl)
+        lay.addSpacing(10)
         self.mode_tabs = ModeTabBar()
         self.mode_tabs.mode_changed.connect(self.mode_changed)
         lay.addWidget(self.mode_tabs)
-
         lay.addStretch()
-
-        self.btn_plot = QPushButton('PLOT')
-        self.btn_plot.setObjectName('headerPlotBtn')
-        self.btn_plot.setFixedHeight(s(42))
-        self.btn_plot.setMinimumWidth(s(96))
-        self.btn_plot.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_plot.clicked.connect(self.plot_requested)
-        lay.addWidget(self.btn_plot)
-        lay.addSpacing(s(8))
-
+        for name, label, tip in (
+            ('presets', 'Presets', 'Save or apply a plot preset'),
+            ('open', 'Open', 'Open a project'),
+            ('save', 'Save', 'Save this project'),
+            ('plot', 'Plot', 'Render the active figure (Ctrl+Enter)'),
+            ('export', 'Export', 'Export the active figure as PNG, PDF or SVG'),
+        ):
+            button = QPushButton(label)
+            button.setObjectName('headerPlotBtn' if name == 'plot' else 'headerAction')
+            button.setToolTip(tip)
+            button.clicked.connect(getattr(self, name + '_requested'))
+            setattr(self, 'btn_' + name, button)
+            lay.addWidget(button)
+        lay.addSpacing(4)
         self.btn_theme = QPushButton('Dark')
         self.btn_theme.setObjectName('themeToggle')
         self.btn_theme.setCheckable(True)
-        self.btn_theme.setFixedSize(s(62), s(36))
+        self.btn_theme.setToolTip('Switch light or dark theme')
         self.btn_theme.toggled.connect(self.theme_toggled)
         lay.addWidget(self.btn_theme)
 
-    def _set_title_colors(self, ink: str, muted: str):
-        ff = spectra_theme.UI_FONT_FAMILY
-        self._title_lbl.setText(
-            f'<span style="font-family:{ff};font-size:{s(30)}px;font-weight:800;'
-            f'letter-spacing:0;color:{ink};">SPECTRA</span>'
-            f'<span style="font-family:{ff};font-size:{s(30)}px;font-weight:300;'
-            f'color:{muted};">plot</span>'
-        )
-
     def apply_theme(self, dark: bool):
-        self._set_title_colors('#D4D4D4' if dark else '#171717',
-                               '#6A6A6A' if dark else '#5F5F5F')
         self.btn_theme.setText('Light' if dark else 'Dark')
 
-
-# ── Trace edit dialog ─────────────────────────────────────────────────────────
 
 class TraceEditDialog(QDialog):
     """Edit one trace: display name, color, gradient opt-out, visibility,
@@ -870,7 +812,7 @@ class ReferenceEditDialog(QDialog):
         super().__init__(parent)
         self.idx = idx
         self.controls = controls
-        self.setWindowTitle('Edit Reference')
+        self.setWindowTitle('Edit reference')
         self.setMinimumWidth(s(340))
 
         form = QFormLayout(self)
@@ -880,6 +822,8 @@ class ReferenceEditDialog(QDialog):
         cur_color = controls.xrd_ref_colors[idx] if idx < len(controls.xrd_ref_colors) else '#000000'
         cur_w = controls.xrd_ref_widths[idx] if idx < len(controls.xrd_ref_widths) else None
         cur_ls = controls.xrd_ref_styles[idx] if idx < len(controls.xrd_ref_styles) else 'solid'
+        cur_scale = controls.xrd_ref_scales[idx] if idx < len(controls.xrd_ref_scales) else 1.0
+        cur_off = controls.xrd_ref_offsets[idx] if idx < len(controls.xrd_ref_offsets) else 0.0
 
         self.edit_name = QLineEdit(cur_label)
         form.addRow('Label', self.edit_name)
@@ -911,6 +855,16 @@ class ReferenceEditDialog(QDialog):
             self.combo_ls.setCurrentText(cur_ls)
         form.addRow('Line style', self.combo_ls)
 
+        # y = y × scale + offset, applied before stacking. Divide by 3 = 0.3333.
+        self.spin_scale = FlatDoubleSpinBox()
+        self.spin_scale.setRange(0.0001, 10000.0); self.spin_scale.setDecimals(4)
+        self.spin_scale.setSingleStep(0.1); self.spin_scale.setValue(float(cur_scale))
+        form.addRow('Intensity ×', self.spin_scale)
+        self.spin_off = FlatDoubleSpinBox()
+        self.spin_off.setRange(-1e9, 1e9); self.spin_off.setDecimals(3)
+        self.spin_off.setValue(float(cur_off))
+        form.addRow('Offset +', self.spin_off)
+
         bb = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self.accept)
@@ -929,6 +883,10 @@ class ReferenceEditDialog(QDialog):
             c.xrd_ref_widths[i] = self.spin_lw.value() if self.chk_lw.isChecked() else None
         if i < len(c.xrd_ref_styles):
             c.xrd_ref_styles[i] = self.combo_ls.currentText()
+        if i < len(c.xrd_ref_scales):
+            c.xrd_ref_scales[i] = self.spin_scale.value()
+        if i < len(c.xrd_ref_offsets):
+            c.xrd_ref_offsets[i] = self.spin_off.value()
 
 
 # ── Per-row trace widget (name label + eye toggle) ───────────────────────────
@@ -1225,6 +1183,7 @@ class PanelFileWidget(QWidget):
         self.chk_gradient.blockSignals(False)
         self._toggle_gradient(self.chk_gradient.isChecked())
         for tr in st.get('traces', []):
+            tr.setdefault('display_name', tr.get('label', clean_label(os.path.basename(tr['path']))))
             self.traces.append(tr)
             item = QListWidgetItem()
             item.setSizeHint(QSize(0, 30))
@@ -1576,7 +1535,7 @@ def _sep() -> QLabel:
 
 # ── Control panel ─────────────────────────────────────────────────────────────
 
-class ControlPanel(QScrollArea):
+class ControlPanel(QWidget):
     plot_requested = pyqtSignal()
     live_update_requested = pyqtSignal()
     ta_fit_requested = pyqtSignal()
@@ -1584,19 +1543,11 @@ class ControlPanel(QScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('sidebar')
-        self.setWidgetResizable(True)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setFixedWidth(s(368))
-
-        root = QWidget()
-        root.setObjectName('sidebar')
-        root.setMinimumWidth(0)
-        root.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.setWidget(root)
-
-        lay = QVBoxLayout(root)
-        lay.setContentsMargins(s(8), vs(8), s(8), vs(12))
-        lay.setSpacing(vs(6))
+        self.setMinimumWidth(280)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
 
         self._current_mode = MODES[0]['key']
         # Global-fit results, keyed by TA dataset uid. Cleared whenever a TA
@@ -1647,7 +1598,7 @@ class ControlPanel(QScrollArea):
         dgl.addWidget(self.panel_tabs)
         lay.addWidget(self.g_data)
 
-        self.g_iv = QGroupBox('IV Curve Data')
+        self.g_iv = QGroupBox('IV curve data')
         iv_lay = QVBoxLayout(self.g_iv)
         iv_lay.setContentsMargins(s(4), vs(14), s(4), vs(8))
         iv_lay.setSpacing(vs(8))
@@ -1673,7 +1624,7 @@ class ControlPanel(QScrollArea):
         lay.addWidget(self.g_iv)
 
         # ── TA data (one 2-D map per panel)
-        self.g_ta = QGroupBox('TA Data')
+        self.g_ta = QGroupBox('TA data')
         ta_lay = QVBoxLayout(self.g_ta)
         ta_lay.setContentsMargins(s(4), vs(14), s(4), vs(8))
         ta_lay.setSpacing(vs(8))
@@ -1857,8 +1808,8 @@ class ControlPanel(QScrollArea):
         self.spin_fs.setRange(6, 28); self.spin_fs.setValue(16)
         sgl.addLayout(_labeled('Font size', self.spin_fs))
 
-        sgl.addWidget(_sep())
-
+        g_dimensions = QGroupBox('Figure size & export')
+        dimensions_lay = QVBoxLayout(g_dimensions)
         fw_row = QHBoxLayout(); fw_row.setSpacing(s(5))
         fw_lbl = QLabel('Size (px)'); fw_lbl.setFixedWidth(s(66)); fw_lbl.setObjectName('fieldlbl')
         self.spin_fw = FlatSpinBox()
@@ -1871,11 +1822,11 @@ class ControlPanel(QScrollArea):
         fw_row.addWidget(self.spin_fw)
         fw_row.addWidget(fw_x)
         fw_row.addWidget(self.spin_fh)
-        sgl.addLayout(fw_row)
-        fw_note = QLabel('Width × Height — fixed canvas size & export size')
+        dimensions_lay.addLayout(fw_row)
+        fw_note = QLabel('Width × height in pixels. Preview zoom does not change export size.')
         fw_note.setObjectName('hint')
         fw_note.setWordWrap(True)
-        sgl.addWidget(fw_note)
+        dimensions_lay.addWidget(fw_note)
         lay.addWidget(g5)
 
         # ── Graph Appearance (figure font family)
@@ -1929,7 +1880,7 @@ class ControlPanel(QScrollArea):
         tgl.addStretch(1)
 
         # ── Number format (axis notation)
-        g_num = QGroupBox('Axis Numbers')
+        g_num = QGroupBox('Axis numbers')
         ngl = QVBoxLayout(g_num)
         ngl.setSpacing(vs(4))
         ngl.setContentsMargins(s(8), vs(6), s(8), vs(6))
@@ -1975,7 +1926,9 @@ class ControlPanel(QScrollArea):
         lgll.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.chk_legend = QCheckBox('Show legend')
         self.chk_legend.setChecked(True)
+        self.chk_legend.toggled.connect(self._toggle_legend)
         lgll.addRow(self.chk_legend)
+        self._legend_form = lgll
         # PL only: order legend entries from highest peak (top) to lowest (bottom),
         # independent of plot/gradient order. When off, legend follows add order.
         self.chk_legend_peak_order = QCheckBox('Order legend by peak (high→low)')
@@ -2034,7 +1987,7 @@ class ControlPanel(QScrollArea):
         lgll.addRow(self.chk_legend_markerfirst)
 
         # ── Plot Box (axis box, tick-label padding, manual geometry, snap)
-        g_box = QGroupBox('Plot Box')
+        g_box = QGroupBox('Plot box')
         bgl = QFormLayout(g_box)
         bgl.setVerticalSpacing(vs(4))
         bgl.setContentsMargins(s(8), vs(6), s(8), vs(6))
@@ -2101,7 +2054,7 @@ class ControlPanel(QScrollArea):
         lay.addWidget(self.g_smooth)
 
         # ── PL options
-        self.g_pl = QGroupBox('PL Options')
+        self.g_pl = QGroupBox('PL options')
         plgl = QVBoxLayout(self.g_pl)
         plgl.setSpacing(vs(9))
         self.chk_pl_baseline = QCheckBox('Baseline subtract')
@@ -2123,7 +2076,7 @@ class ControlPanel(QScrollArea):
         lay.addWidget(self.g_pl)
 
         # ── Absorbance options
-        self.g_abs = QGroupBox('Absorbance Options')
+        self.g_abs = QGroupBox('Absorbance options')
         abgl = QVBoxLayout(self.g_abs)
         abgl.setSpacing(vs(9))
         self.chk_abs_normalize = QCheckBox('Normalize (0–1)')
@@ -2140,7 +2093,7 @@ class ControlPanel(QScrollArea):
         lay.addWidget(self.g_abs)
 
         # ── XRD options
-        self.g_xrd = QGroupBox('XRD Options')
+        self.g_xrd = QGroupBox('XRD options')
         xgl = QVBoxLayout(self.g_xrd)
         xgl.setSpacing(vs(9))
         self.chk_d = QCheckBox('Convert 2θ → d-spacing (Å)')
@@ -2210,6 +2163,8 @@ class ControlPanel(QScrollArea):
         self.xrd_ref_labels: list[str] = []   # per-reference legend label
         self.xrd_ref_widths: list = []        # per-reference line width override (None = global)
         self.xrd_ref_styles: list[str] = []   # per-reference line style
+        self.xrd_ref_scales: list[float] = []  # per-reference intensity multiplier
+        self.xrd_ref_offsets: list[float] = []  # per-reference additive offset
         self.xrd_ref_list.itemDoubleClicked.connect(
             lambda item: self.edit_reference(self.xrd_ref_list.row(item)))
         xgl.addWidget(self.xrd_ref_list)
@@ -2244,7 +2199,7 @@ class ControlPanel(QScrollArea):
         # Slices fixes time and scans wavelength (manuscript panels a/b),
         # Kinetics fixes wavelength and scans time (panel d), and Global fit
         # spectra shows the amplitude of each fitted component vs wavelength.
-        self.g_ta_opts = QGroupBox('TA Options')
+        self.g_ta_opts = QGroupBox('TA options')
         tgl = QVBoxLayout(self.g_ta_opts)
         tgl.setSpacing(vs(9))
 
@@ -2549,8 +2504,7 @@ class ControlPanel(QScrollArea):
         self._toggle_ta_uv_range(self.chk_ta_uv_auto.isChecked())
 
         # ── Export
-        g6 = QGroupBox('Export')
-        egl = QVBoxLayout(g6)
+        egl = dimensions_lay
         egl.setSpacing(vs(9))
         self.spin_dpi = FlatSpinBox()
         self.spin_dpi.setRange(72, 600); self.spin_dpi.setSingleStep(50); self.spin_dpi.setValue(300)
@@ -2561,9 +2515,20 @@ class ControlPanel(QScrollArea):
             b.clicked.connect(lambda checked, f=fmt.lower(): self._save(f))
             fmt_row.addWidget(b)
         egl.addLayout(fmt_row)
-        lay.addWidget(g6)
-
-        lay.addStretch()
+        g4.setTitle('Titles & labels')
+        g5.setTitle('Lines & type')
+        g_app.setTitle('Figure font')
+        self.g_data.setTitle('Files & traces')
+        self.g_plot.setTitle('Panels')
+        arrange_workspace(self, lay, [
+            ('Data', [(self.g_data, True), (self.g_iv, True), (self.g_ta, True),
+                      (self.g_pl, True), (self.g_abs, True), (self.g_xrd, True),
+                      (self.g_ta_opts, True), (self.g_smooth, False)]),
+            ('Layout', [(self.g_plot, True), (self.g_axes, True), (g4, False),
+                        (g_dimensions, True), (g_box, False)]),
+            ('Style', [(g5, True), (g_app, True), (g_tick, False),
+                       (g_num, False), (g_legend, False)]),
+        ])
 
         self._canvas = None
         self.before_save = None   # MainWindow sets this to clear canvas selection pre-export
@@ -2786,6 +2751,11 @@ class ControlPanel(QScrollArea):
         self.spin_pymax.setEnabled(not auto)
 
     def _toggle_legend(self, *_):
+        show = self.chk_legend.isChecked()
+        for i in range(self._legend_form.count()):
+            w = self._legend_form.itemAt(i).widget()
+            if w is not None and w is not self.chk_legend:
+                w.setEnabled(show)
         # Transparent toggles disable their corresponding color/value inputs.
         transp_bg = self.chk_legend_transp_bg.isChecked()
         self.color_legend_bg.setEnabled(not transp_bg)
@@ -2811,6 +2781,8 @@ class ControlPanel(QScrollArea):
                 self.xrd_ref_labels.append(clean_label(os.path.basename(p)))
                 self.xrd_ref_widths.append(None)
                 self.xrd_ref_styles.append('solid')
+                self.xrd_ref_scales.append(1.0)
+                self.xrd_ref_offsets.append(0.0)
                 self.xrd_ref_list.addItem(clean_label(os.path.basename(p)))
         self._update_xrd_ref_move_buttons(self.xrd_ref_list.currentRow())
 
@@ -2823,7 +2795,8 @@ class ControlPanel(QScrollArea):
             self.xrd_ref_list.takeItem(r)
             self.xrd_ref_paths.pop(r)
             for lst in (self.xrd_ref_colors, self.xrd_ref_labels,
-                        self.xrd_ref_widths, self.xrd_ref_styles):
+                        self.xrd_ref_widths, self.xrd_ref_styles,
+                        self.xrd_ref_scales, self.xrd_ref_offsets):
                 if r < len(lst):
                     lst.pop(r)
         self._update_xrd_ref_move_buttons(self.xrd_ref_list.currentRow())
@@ -2836,7 +2809,8 @@ class ControlPanel(QScrollArea):
         if new_row < 0 or new_row >= len(self.xrd_ref_paths):
             return
         for lst in (self.xrd_ref_paths, self.xrd_ref_colors, self.xrd_ref_labels,
-                    self.xrd_ref_widths, self.xrd_ref_styles):
+                    self.xrd_ref_widths, self.xrd_ref_styles,
+                    self.xrd_ref_scales, self.xrd_ref_offsets):
             if new_row < len(lst):
                 lst[row], lst[new_row] = lst[new_row], lst[row]
         self.refresh_xrd_ref_list()
@@ -2880,6 +2854,7 @@ class ControlPanel(QScrollArea):
             for tr in pw.traces:
                 if tr.get('uid') == uid:
                     tr['display_name'] = label
+                    pw._rebuild_list()  # row widgets show display_name; redraw them
                     return True
         return False
 
@@ -2921,6 +2896,8 @@ class ControlPanel(QScrollArea):
         self.xrd_ref_labels.clear()
         self.xrd_ref_widths.clear()
         self.xrd_ref_styles.clear()
+        self.xrd_ref_scales.clear()
+        self.xrd_ref_offsets.clear()
         self.xrd_ref_list.clear()
 
     def capture_data(self) -> dict:
@@ -2943,6 +2920,8 @@ class ControlPanel(QScrollArea):
             'xrd_ref_labels': list(self.xrd_ref_labels),
             'xrd_ref_widths': list(self.xrd_ref_widths),
             'xrd_ref_styles': list(self.xrd_ref_styles),
+            'xrd_ref_scales': list(self.xrd_ref_scales),
+            'xrd_ref_offsets': list(self.xrd_ref_offsets),
             # ── Style (Plot Style dock + graph appearance) ──
             'style': self._style_preset(),
             # ── Axes (Build panel) ──
@@ -2970,6 +2949,13 @@ class ControlPanel(QScrollArea):
                 'sub': self.edit_subtitle.text(),
                 'show_panel': self.chk_panel_titles.isChecked(),
                 'panel': self.edit_panel_titles.text(),
+            },
+            'control_values': {
+                'dpi': self.spin_dpi.value(),
+                'ta_high_lo': self.spin_ta_high_lo.value(),
+                'ta_high_hi': self.spin_ta_high_hi.value(),
+                'ta_low_lo': self.spin_ta_low_lo.value(),
+                'ta_low_hi': self.spin_ta_low_hi.value(),
             },
         }
 
@@ -3012,6 +2998,8 @@ class ControlPanel(QScrollArea):
         self.xrd_ref_labels = list(snap.get('xrd_ref_labels', []))
         self.xrd_ref_widths = list(snap.get('xrd_ref_widths', []))
         self.xrd_ref_styles = list(snap.get('xrd_ref_styles', []))
+        self.xrd_ref_scales = list(snap.get('xrd_ref_scales', []))
+        self.xrd_ref_offsets = list(snap.get('xrd_ref_offsets', []))
         # Backfill parallel lists for older snapshots / mismatched lengths.
         while len(self.xrd_ref_colors) < len(self.xrd_ref_paths):
             self.xrd_ref_colors.append('#000000')
@@ -3022,6 +3010,10 @@ class ControlPanel(QScrollArea):
             self.xrd_ref_widths.append(None)
         while len(self.xrd_ref_styles) < len(self.xrd_ref_paths):
             self.xrd_ref_styles.append('solid')
+        while len(self.xrd_ref_scales) < len(self.xrd_ref_paths):
+            self.xrd_ref_scales.append(1.0)
+        while len(self.xrd_ref_offsets) < len(self.xrd_ref_paths):
+            self.xrd_ref_offsets.append(0.0)
         self.refresh_xrd_ref_list()
 
         # ── Style ──
@@ -3058,6 +3050,15 @@ class ControlPanel(QScrollArea):
         _txt(self.edit_subtitle, t.get('sub', ''))
         _chk(self.chk_panel_titles, t.get('show_panel', True))
         _txt(self.edit_panel_titles, t.get('panel', ''))
+
+        values = snap.get('control_values', {})
+        for key, widget in (
+            ('dpi', self.spin_dpi), ('ta_high_lo', self.spin_ta_high_lo),
+            ('ta_high_hi', self.spin_ta_high_hi), ('ta_low_lo', self.spin_ta_low_lo),
+            ('ta_low_hi', self.spin_ta_low_hi),
+        ):
+            if key in values:
+                _val(widget, values[key])
 
         # Refresh enable/visibility states that the blocked setters skipped.
         self._toggle_separate_x(self.chk_separate_x.isChecked())
@@ -3163,6 +3164,8 @@ class ControlPanel(QScrollArea):
             'xrd_ref_labels': list(self.xrd_ref_labels),
             'xrd_ref_widths': list(self.xrd_ref_widths),
             'xrd_ref_styles': list(self.xrd_ref_styles),
+            'xrd_ref_scales': list(self.xrd_ref_scales),
+            'xrd_ref_offsets': list(self.xrd_ref_offsets),
             # Transient absorption
             'ta_datasets': ta_datasets,
             'ta_plot_kind': self.ta_plot_kind(),
@@ -3352,6 +3355,7 @@ class ControlPanel(QScrollArea):
         self._toggle_ta_sections()
         self._toggle_ta_trim(self.chk_ta_trim.isChecked())
         self._toggle_ta_uv_range(self.chk_ta_uv_auto.isChecked())
+        self._toggle_legend()
         # Color buttons
         if 'box_color'         in p: self.color_box.set_hex(p['box_color'])
         if 'legend_bg_color'   in p: self.color_legend_bg.set_hex(p['legend_bg_color'])
@@ -3575,20 +3579,26 @@ class LegendEditDialog(QDialog):
 class _MoveCommand(QUndoCommand):
     """Undo/redo a single text-artist drag in the figure editor."""
 
-    def __init__(self, artist, before_pos, after_pos, canvas):
+    def __init__(self, artist, before_pos, after_pos, canvas,
+                 position_changed=None):
         super().__init__('Move')
         self._artist = artist
         self._before = before_pos
         self._after = after_pos
         self._canvas = canvas
+        self._position_changed = position_changed
+
+    def _apply(self, position):
+        self._artist.set_position(position)
+        if self._position_changed is not None:
+            self._position_changed(self._artist, position)
+        self._canvas.draw_idle()
 
     def undo(self):
-        self._artist.set_position(self._before)
-        self._canvas.draw_idle()
+        self._apply(self._before)
 
     def redo(self):
-        self._artist.set_position(self._after)
-        self._canvas.draw_idle()
+        self._apply(self._after)
 
 
 class FigureEditor:
@@ -3608,10 +3618,16 @@ class FigureEditor:
         self.canvas = canvas_widget.canvas
         self._texts = []                 # editable Text artists (current plot)
         self._role_by_artist = {}        # id(artist) -> stable role str or None
+        self._text_defaults = {}         # role -> generated state before overrides
         self._legends = []
+        self._legend_role_by_artist = {}
+        self._legend_defaults = {}
+        self.legend_overrides = {}
         self._selected = []              # multi-selection of Text artists
         self._drag = None                # dict while dragging
         self._press = None               # dict between press and release
+        self._legend_press = None
+        self._legend_release_cid = None
         self._box_selected = False       # plot-box resize mode
         self._box_artists = []           # overlay outline + handle patches
         self._box_drag = None            # dict while resizing the plot box
@@ -3620,10 +3636,27 @@ class FigureEditor:
         self.overrides = {}              # role -> {text,fontsize,color,bold,italic,pos}
         self.controls = None             # ControlPanel, set by MainWindow
         self.request_replot = None       # callable, set by MainWindow
+        self.changed_callback = None     # callable, set by document owner
+        self._suppress_changed = False
         self.undo_stack = QUndoStack()
+        self.undo_stack.indexChanged.connect(self._notify_changed)
         self.canvas.mpl_connect('button_press_event', self._on_press)
         self.canvas.mpl_connect('motion_notify_event', self._on_motion)
         self.canvas.mpl_connect('button_release_event', self._on_release)
+
+    def _notify_changed(self, *_):
+        if self._suppress_changed:
+            return
+        callback = self.changed_callback
+        if callable(callback):
+            callback()
+
+    def _clear_undo_history(self):
+        self._suppress_changed = True
+        try:
+            self.undo_stack.clear()
+        finally:
+            self._suppress_changed = False
 
     def set_snap(self, enabled: bool, step: float):
         self.snap_enabled = bool(enabled)
@@ -3642,6 +3675,7 @@ class FigureEditor:
     def refresh(self):
         fig = self.cw.fig
         texts, roles = [], {}
+        self._clear_undo_history()
 
         def add(artist, role):
             texts.append(artist)
@@ -3655,11 +3689,11 @@ class FigureEditor:
             if not t.get_text():
                 continue
             if t.get_gid() == 'xrd_margin_label':
-                add(t, None)            # auto-generated; draggable but not persisted
+                continue                # assigned from its plotted source below
             elif not sub_assigned:
                 add(t, 'subtitle'); sub_assigned = True
             else:
-                add(t, None)
+                add(t, f'figure-text:{len(texts)}')
         for pidx, ax in enumerate(fig.axes):
             if ax.get_title():
                 add(ax.title, f'title:{pidx}')
@@ -3667,20 +3701,216 @@ class FigureEditor:
                 add(ax.xaxis.label, f'xlabel:{pidx}')
             if ax.get_ylabel():
                 add(ax.yaxis.label, f'ylabel:{pidx}')
+            for tidx, t in enumerate(ax.texts):
+                if t.get_text():
+                    identity = t.get_gid() or tidx
+                    add(t, f'annotation:{pidx}:{identity}')
+        for t, role in self._xrd_margin_roles():
+            add(t, role)
         self._texts = texts
         self._role_by_artist = roles
+        self._text_defaults = {
+            role: self._text_state(artist)
+            for artist in texts
+            if (role := roles.get(id(artist)))
+        }
         self._selected = []             # artists were recreated; drop stale selection
         self._box_artists = []          # overlay was wiped by fig.clear()
         self._box_selected = False
         self._box_drag = None
 
         self._legends = [ax.get_legend() for ax in fig.axes if ax.get_legend() is not None]
+        self._legend_role_by_artist = {
+            id(leg): f'legend:{fig.axes.index(leg.axes)}' for leg in self._legends
+        }
+        self._legend_defaults = {
+            self._legend_role_by_artist[id(leg)]: self._legend_state(leg)
+            for leg in self._legends
+        }
         for leg in self._legends:
             try:
                 leg.set_draggable(True, use_blit=False)
             except Exception:
                 pass
 
+        # Matplotlib's draggable legend finalizes its location on button release.
+        # Reconnect ours after set_draggable so we observe the finalized location.
+        if self._legend_release_cid is not None:
+            self.canvas.mpl_disconnect(self._legend_release_cid)
+        self._legend_release_cid = self.canvas.mpl_connect(
+            'button_release_event', self._on_legend_release)
+
+        self._apply_overrides()
+
+    @staticmethod
+    def _json_value(value):
+        if isinstance(value, dict):
+            return {str(k): FigureEditor._json_value(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [FigureEditor._json_value(v) for v in value]
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        try:
+            return value.item()
+        except Exception:
+            return str(value)
+
+    @staticmethod
+    def _text_state(artist):
+        return {
+            'text': artist.get_text(),
+            'fontsize': float(artist.get_fontsize()),
+            'color': to_hex(artist.get_color()),
+            'bold': str(artist.get_fontweight()) in ('bold', '700', 'heavy', 'semibold'),
+            'italic': artist.get_style() == 'italic',
+            'pos': [float(v) for v in artist.get_position()],
+        }
+
+    def _source_identity(self, source):
+        if not source or len(source) != 2:
+            return None
+        kind, key = source
+        if kind == 'xrdref' and self.controls is not None:
+            try:
+                key = os.path.abspath(self.controls.xrd_ref_paths[int(key)])
+            except Exception:
+                pass
+        return self._json_value([kind, key])
+
+    def _xrd_margin_roles(self):
+        labels = [t for t in self.cw.fig.texts
+                  if t.get_gid() == 'xrd_margin_label' and t.get_text()]
+        candidates = []
+        for pidx, ax in enumerate(self.cw.fig.axes):
+            for line in ax.lines:
+                label = str(line.get_label())
+                if not label or label.startswith('_'):
+                    continue
+                source = self._source_identity(getattr(line, '_spectra_src', None))
+                candidates.append({
+                    'panel': pidx, 'label': label, 'source': source, 'used': False,
+                })
+
+        result = []
+        fallback_counts = {}
+        for text in labels:
+            matches = [c for c in candidates
+                       if not c['used'] and c['label'] == text.get_text()]
+            candidate = matches[0] if matches else next(
+                (c for c in candidates if not c['used']), None)
+            if candidate is not None:
+                candidate['used'] = True
+                identity = candidate['source'] or ['label', candidate['label']]
+                fragment = json.dumps(identity, ensure_ascii=False,
+                                      separators=(',', ':'))
+                role = f"xrd-label:{candidate['panel']}:{fragment}"
+            else:
+                stem = text.get_text()
+                occurrence = fallback_counts.get(stem, 0)
+                fallback_counts[stem] = occurrence + 1
+                role = f'xrd-label:auto:{stem}:{occurrence}'
+            result.append((text, role))
+        return result
+
+    def _legend_state(self, legend):
+        frame = legend.get_frame()
+        sources = list(getattr(legend, '_spectra_sources', None) or [])
+        entries = []
+        for idx, text in enumerate(legend.get_texts()):
+            source = self._source_identity(sources[idx]) if idx < len(sources) else None
+            entries.append({
+                'source': source,
+                'index': idx,
+                'text': text.get_text(),
+                'fontsize': float(text.get_fontsize()),
+                'color': to_hex(text.get_color()),
+                'fontweight': str(text.get_fontweight()),
+                'fontstyle': text.get_style(),
+            })
+        return {
+            'loc': self._json_value(getattr(legend, '_loc', None)),
+            'frame': {
+                'visible': bool(frame.get_visible()),
+                'facecolor': to_hex(frame.get_facecolor(), keep_alpha=True),
+                'edgecolor': to_hex(frame.get_edgecolor(), keep_alpha=True),
+                'linewidth': float(frame.get_linewidth()),
+                'alpha': (None if frame.get_alpha() is None
+                          else float(frame.get_alpha())),
+            },
+            'texts': entries,
+        }
+
+    @staticmethod
+    def _entry_key(entry):
+        source = entry.get('source')
+        if source is not None:
+            return ('source', json.dumps(source, ensure_ascii=False, sort_keys=True))
+        return ('index', int(entry.get('index', -1)))
+
+    def _sync_live_overrides(self):
+        for artist in self._texts:
+            role = self._role_by_artist.get(id(artist))
+            default = self._text_defaults.get(role)
+            if not role or default is None:
+                continue
+            current = self._text_state(artist)
+            diff = {key: value for key, value in current.items()
+                    if value != default.get(key)}
+            if diff:
+                self.overrides[role] = diff
+            else:
+                self.overrides.pop(role, None)
+
+        for legend in self._legends:
+            role = self._legend_role_by_artist.get(id(legend))
+            default = self._legend_defaults.get(role)
+            if not role or default is None:
+                continue
+            current = self._legend_state(legend)
+            diff = {}
+            if current['loc'] != default['loc']:
+                diff['loc'] = current['loc']
+            if current['frame'] != default['frame']:
+                diff['frame'] = current['frame']
+            default_entries = {self._entry_key(entry): entry
+                               for entry in default['texts']}
+            text_diffs = []
+            for entry in current['texts']:
+                base = default_entries.get(self._entry_key(entry), {})
+                changed = {
+                    key: value for key, value in entry.items()
+                    if key not in ('source', 'index') and value != base.get(key)
+                }
+                if changed:
+                    changed['source'] = entry['source']
+                    changed['index'] = entry['index']
+                    text_diffs.append(changed)
+            if text_diffs:
+                diff['texts'] = text_diffs
+            if diff:
+                self.legend_overrides[role] = diff
+            else:
+                self.legend_overrides.pop(role, None)
+
+    def capture_state(self) -> dict:
+        """Return JSON-compatible direct-manipulation overrides for this figure."""
+        self._sync_live_overrides()
+        state = {
+            'version': 1,
+            'texts': self.overrides,
+            'legends': self.legend_overrides,
+        }
+        return json.loads(json.dumps(self._json_value(state), ensure_ascii=False))
+
+    def restore_state(self, state: dict):
+        """Store document overrides and apply them to any current artists."""
+        state = state if isinstance(state, dict) else {}
+        texts = state.get('texts', {})
+        legends = state.get('legends', {})
+        self.overrides = self._json_value(texts) if isinstance(texts, dict) else {}
+        self.legend_overrides = (
+            self._json_value(legends) if isinstance(legends, dict) else {})
+        self._clear_undo_history()
         self._apply_overrides()
 
     def _apply_overrides(self):
@@ -3699,7 +3929,51 @@ class FigureEditor:
                 if 'pos' in ov:      artist.set_position(tuple(ov['pos']))
             except Exception:
                 pass
+        for legend in self._legends:
+            role = self._legend_role_by_artist.get(id(legend))
+            ov = self.legend_overrides.get(role) if role else None
+            if ov:
+                self._apply_legend_override(legend, ov)
         self.canvas.draw_idle()
+
+    def _apply_legend_override(self, legend, override):
+        try:
+            if 'loc' in override:
+                loc = override['loc']
+                legend.set_loc(tuple(loc) if isinstance(loc, list) else loc)
+            frame_override = override.get('frame')
+            if isinstance(frame_override, dict):
+                frame = legend.get_frame()
+                if 'facecolor' in frame_override:
+                    frame.set_facecolor(frame_override['facecolor'])
+                if 'edgecolor' in frame_override:
+                    frame.set_edgecolor(frame_override['edgecolor'])
+                if 'linewidth' in frame_override:
+                    frame.set_linewidth(frame_override['linewidth'])
+                if 'visible' in frame_override:
+                    frame.set_visible(frame_override['visible'])
+                if 'alpha' in frame_override:
+                    frame.set_alpha(frame_override['alpha'])
+
+            sources = list(getattr(legend, '_spectra_sources', None) or [])
+            current_entries = []
+            for idx, text in enumerate(legend.get_texts()):
+                source = self._source_identity(sources[idx]) if idx < len(sources) else None
+                current_entries.append((self._entry_key({
+                    'source': source, 'index': idx,
+                }), text))
+            by_key = dict(current_entries)
+            for entry in override.get('texts', []):
+                text = by_key.get(self._entry_key(entry))
+                if text is None:
+                    continue
+                if 'text' in entry:       text.set_text(entry['text'])
+                if 'fontsize' in entry:   text.set_fontsize(entry['fontsize'])
+                if 'color' in entry:      text.set_color(entry['color'])
+                if 'fontweight' in entry: text.set_fontweight(entry['fontweight'])
+                if 'fontstyle' in entry:  text.set_style(entry['fontstyle'])
+        except Exception:
+            pass
 
     # ── hit testing ──────────────────────────────────────────────────────────
     def _text_at(self, event):
@@ -3897,9 +4171,11 @@ class FigureEditor:
                 c.chk_manual_box.setChecked(True)   # makes the geometry stick on replot
         if self.request_replot:
             self.request_replot()
+        self._notify_changed()
 
     # ── events ──────────────────────────────────────────────────────────────
     def _on_press(self, event):
+        self._legend_press = None
         if event.x is None or event.y is None:
             return
         if event.dblclick:
@@ -3937,7 +4213,12 @@ class FigureEditor:
                            'was': was, 'moved': False}
             self._begin_drag(event)
             return
-        if self._legend_at(event) is not None:
+        legend = self._legend_at(event)
+        if legend is not None:
+            self._legend_press = {
+                'legend': legend,
+                'loc': self._json_value(getattr(legend, '_loc', None)),
+            }
             self._press = None
             return
         # click inside the plot area → select the plot box (show resize handles)
@@ -4019,10 +4300,8 @@ class FigureEditor:
             for a, _disp0, start in self._drag['items']:
                 end = tuple(a.get_position())
                 if end != start:
-                    self.undo_stack.push(_MoveCommand(a, start, end, self.canvas))
-                role = self._role_by_artist.get(id(a))
-                if role:
-                    self.overrides.setdefault(role, {})['pos'] = tuple(a.get_position())
+                    self.undo_stack.push(_MoveCommand(
+                        a, start, end, self.canvas, self._record_text_position))
             self.undo_stack.endMacro()
         elif self._press is not None and not moved:
             t = self._press['artist']
@@ -4034,6 +4313,32 @@ class FigureEditor:
         self._drag = None
         self._press = None
 
+    def _record_text_position(self, artist, position):
+        role = self._role_by_artist.get(id(artist))
+        if not role:
+            return
+        value = [float(v) for v in position]
+        default = self._text_defaults.get(role, {}).get('pos')
+        override = self.overrides.setdefault(role, {})
+        if value == default:
+            override.pop('pos', None)
+        else:
+            override['pos'] = value
+        if not override:
+            self.overrides.pop(role, None)
+
+    def _on_legend_release(self, _event):
+        press = self._legend_press
+        self._legend_press = None
+        if not press:
+            return
+        legend = press['legend']
+        after = self._json_value(getattr(legend, '_loc', None))
+        if after == press['loc']:
+            return
+        self._capture_legend_override(legend)
+        self._notify_changed()
+
     # ── editors ────────────────────────────────────────────────────────────
     def _edit_text(self, t):
         dlg = TextEditDialog(t, self.cw)
@@ -4042,6 +4347,7 @@ class FigureEditor:
             self._capture_text_override(t)
             self._sync_text_to_controls(t)
             self.canvas.draw_idle()
+            self._notify_changed()
 
     def _capture_text_override(self, t):
         role = self._role_by_artist.get(id(t))
@@ -4054,10 +4360,29 @@ class FigureEditor:
         ov['bold'] = str(t.get_fontweight()) in ('bold', '700', 'heavy', 'semibold')
         ov['italic'] = t.get_style() == 'italic'
 
+    def _capture_legend_override(self, legend):
+        role = self._legend_role_by_artist.get(id(legend))
+        default = self._legend_defaults.get(role)
+        if not role or default is None:
+            return
+        # Syncing all live overrides computes a sparse delta against the most
+        # recent generated legend, preserving only fields the user changed.
+        self._sync_live_overrides()
+
     def _sync_text_to_controls(self, t):
-        """Mirror edited title/subtitle text back into the left-panel fields."""
+        """Mirror edited text back into the controls: titles into their fields,
+        XRD margin labels into the trace/reference name they were drawn from."""
         role = self._role_by_artist.get(id(t))
         if not role or self.controls is None:
+            return
+        src = getattr(t, '_spectra_src', None)
+        if src:
+            kind, key = src
+            if kind == 'trace':
+                self.controls.set_trace_label_by_uid(key, t.get_text())
+            elif kind == 'xrdref' and 0 <= key < len(self.controls.xrd_ref_labels):
+                self.controls.xrd_ref_labels[key] = t.get_text()
+                self.controls.refresh_xrd_ref_list()
             return
         target = None
         if role == 'suptitle':
@@ -4085,6 +4410,7 @@ class FigureEditor:
             dlg = TraceEditDialog(tr, self.cw)
             if dlg.exec():
                 dlg.apply()
+                self._notify_changed()
                 if self.request_replot:
                     self.request_replot()
 
@@ -4092,7 +4418,9 @@ class FigureEditor:
         dlg = LegendEditDialog(leg, self.cw, controls=self.controls)
         if dlg.exec():
             dlg.apply()
+            self._capture_legend_override(leg)
             self.canvas.draw_idle()
+            self._notify_changed()
             if dlg.needs_replot and self.request_replot:
                 self.request_replot()
 
@@ -4210,6 +4538,18 @@ class PlotCanvas(QWidget):
         lay.addWidget(self.card)
 
         self.set_fig_size(8.0, 5.0)
+        self.canvas.mpl_connect('resize_event', self._restore_figure_geometry)
+
+    def _restore_figure_geometry(self, _event=None):
+        """On a devicePixelRatio change (window dragged to a monitor with a
+        different scale) Matplotlib rewrites fig.dpi from its construction-time
+        value — dropping the view scale — then re-derives the inch size from
+        the pixel size, so a zoomed figure grows by the zoom factor and stays
+        that way. It ends every such path with resize_event; re-pin the true
+        inches and the scaled DPI here."""
+        self.fig.set_size_inches(self._fig_w_in, self._fig_h_in, forward=False)
+        dpr = self.canvas.devicePixelRatioF() or 1.0
+        self.fig.set_dpi(self.DISPLAY_DPI * self._view_scale * dpr)
 
     def _toolbar_fit(self):
         for ax in self.fig.axes:
@@ -4226,14 +4566,18 @@ class PlotCanvas(QWidget):
     def set_fig_size(self, w_in: float, h_in: float):
         """Set the figure's true (export) size in inches, then lay it out on
         screen at the current view scale."""
+        requested_px = (int(round(w_in * self.DISPLAY_DPI)),
+                        int(round(h_in * self.DISPLAY_DPI)))
+        if requested_px == self.applied_size_pixels():
+            self.mark_size_pending(False)
+            return
         self._fig_w_in = w_in
         self._fig_h_in = h_in
         self.fig.set_size_inches(w_in, h_in)
         self._apply_display_size()
         # Logical (unscaled) pixels track the requested figure size for the
         # pending-size ("Update") bookkeeping; the view scale never affects it.
-        self._applied_size_px = (int(round(w_in * self.DISPLAY_DPI)),
-                                 int(round(h_in * self.DISPLAY_DPI)))
+        self._applied_size_px = requested_px
         self.mark_size_pending(False)
 
     def set_view_scale(self, z: float):
@@ -4583,6 +4927,7 @@ def _add_xrd_margin_labels(fig: Figure, ax, min_gap: float = 0.25):
             clip_on=False,
         )
         text.set_gid('xrd_margin_label')
+        text._spectra_src = getattr(_line, '_spectra_src', None)  # edits write back to this source
 
 
 def _plot_pl(axes: list, s: dict) -> int:
@@ -4699,11 +5044,16 @@ def _plot_xrd(axes: list, s: dict) -> int:
     ref_labels = s.get('xrd_ref_labels', [])
     ref_widths = s.get('xrd_ref_widths', [])
     ref_styles = s.get('xrd_ref_styles', [])
+    ref_scales = s.get('xrd_ref_scales', [])
+    ref_offsets = s.get('xrd_ref_offsets', [])
     ref_traces = []
     for idx, path in enumerate(s['xrd_ref_paths']):
         x, y = load_file(path)
         if x is not None:
             x, y = maybe_convert(x, y)
+            # Per-reference math (Edit reference dialog); stacking is added on top.
+            y = (y * (float(ref_scales[idx]) if idx < len(ref_scales) else 1.0)
+                 + (float(ref_offsets[idx]) if idx < len(ref_offsets) else 0.0))
             # Normalize only applies to experimental traces — references keep
             # their own intensities so their relative peak heights stay intact.
             lbl = ref_labels[idx] if idx < len(ref_labels) else clean_label(os.path.basename(path))
@@ -5294,7 +5644,7 @@ def create_loading_screen() -> QSplashScreen:
         img_lbl.setPixmap(pix)
         layout.addWidget(img_lbl)
 
-    # SPECTRA (extrabold) + plot (light), big, in Montserrat
+    # SPECTRA (extrabold) + plot (light), big
     ff = spectra_theme.UI_FONT_FAMILY
     title = QLabel()
     title.setObjectName('loadingTitle')
@@ -5311,7 +5661,7 @@ def create_loading_screen() -> QSplashScreen:
     subtitle.setObjectName('loadingSubtitle')
     subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-    status = QLabel('preparing plotting workspace...')
+    status = QLabel('Preparing plotting workspace...')
     status.setObjectName('loadingStatus')
     status.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -5352,7 +5702,7 @@ def create_loading_screen() -> QSplashScreen:
     ]
     import random as _random
     _random.shuffle(_quips)
-    _quips.insert(0, 'preparing plotting workspace...')   # always start here
+    _quips.insert(0, 'Preparing plotting workspace...')   # always start here
     _qi = {'i': 0}
 
     def _next_quip():
@@ -5390,33 +5740,15 @@ def create_loading_screen() -> QSplashScreen:
     return splash
 
 
-class LogPanel(QWidget):
-    """Append-only message console echoing status-bar messages."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("logPanel")
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(s(4), s(4), s(4), s(4))
-        lay.setSpacing(0)
-        self.view = QPlainTextEdit()
-        self.view.setObjectName("logView")
-        self.view.setReadOnly(True)
-        lay.addWidget(self.view)
-
-    def append(self, msg: str):
-        self.view.appendPlainText(msg)
-
-    def text(self) -> str:
-        return self.view.toPlainText()
-
-
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('SPECTRAplot')
-        self.resize(s(1520), s(900))
-        self.setMinimumSize(s(1100), s(640))
+        self.setWindowTitle('SPECTRAplot Experimental')
+        self.resize(1280, 820)
+        self.setMinimumSize(940, 600)
+        self.storage_dir = os.environ.get(
+            'SPECTRAPLOT_DATA_DIR', os.path.join(os.path.expanduser('~'), '.spectraplot'))
+        self.preset_library = PresetLibrary(self.storage_dir)
 
         self._current_mode = MODES[0]['key']
 
@@ -5439,6 +5771,10 @@ class MainWindow(QMainWindow):
         self.header.mode_changed.connect(self._on_mode_change)
         self.header.theme_toggled.connect(self._on_theme_toggle)
         self.header.plot_requested.connect(self._do_plot)
+        self.header.open_requested.connect(self._choose_open_document)
+        self.header.save_requested.connect(self._choose_save_document)
+        self.header.export_requested.connect(lambda: self.controls._save('png'))
+        self.header.presets_requested.connect(self._save_named_preset)
         # The header spans the full window width above the docks (a top toolbar
         # sits above the left/right dock areas while keeping the menu bar).
         self.header_bar = QToolBar('Header', self)
@@ -5459,53 +5795,13 @@ class MainWindow(QMainWindow):
         self._switch_figure(self._add_figure_state(mode=MODES[0]['key']))
 
         # ── Left dock: Build / Parameters (the ControlPanel) ────────────────
-        self.dock_build = QDockWidget("Build", self)
-        self.dock_build.setObjectName("dock_build")
+        self.dock_build = QDockWidget('Workspace', self)
+        self.dock_build.setObjectName('dock_build')
+        self.dock_build.setMinimumWidth(320)
         self.dock_build.setWidget(self.controls)
-        self.dock_build.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.dock_build.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.dock_build.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock_build)
-
-        # ── Plot Style dock: left area, next to Build (stacked vertically) ─────
-        style_host = QWidget()
-        style_host.setObjectName("plotStyleHost")
-        style_lay = QVBoxLayout(style_host)
-        style_lay.setContentsMargins(s(8), s(8), s(8), s(8))
-        style_lay.setSpacing(s(8))
-
-        # ── Preset buttons at the top of the style dock ──────────────────────
-        preset_row = QWidget()
-        preset_lay = QHBoxLayout(preset_row)
-        preset_lay.setContentsMargins(0, 0, 0, 0)
-        preset_lay.setSpacing(s(6))
-        btn_save_preset = QPushButton('Save Preset')
-        btn_save_preset.setObjectName('presetBtn')
-        btn_load_preset = QPushButton('Load Preset')
-        btn_load_preset.setObjectName('presetBtn')
-        btn_save_preset.clicked.connect(self.controls.save_preset)
-        btn_load_preset.clicked.connect(self.controls.load_preset)
-        preset_lay.addWidget(btn_save_preset)
-        preset_lay.addWidget(btn_load_preset)
-        style_lay.addWidget(preset_row)
-
-        for group in self.controls.take_dock_groups():
-            group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-            style_lay.addWidget(group)
-        style_lay.addStretch()
-        style_scroll = QScrollArea()
-        style_scroll.setObjectName("plotStyleScroll")
-        style_scroll.setWidget(style_host)
-        style_scroll.setWidgetResizable(True)
-        style_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        style_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
-        self.dock_style = QDockWidget("Plot Style", self)
-        self.dock_style.setObjectName("dock_style")
-        self.dock_style.setWidget(style_scroll)
-        self.dock_style.setMinimumWidth(s(360))
-        self.dock_style.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_style)
 
         # (Log panel removed — status messages still go to the status bar.)
         self.log_dock = None
@@ -5518,7 +5814,6 @@ class MainWindow(QMainWindow):
 
         # View-menu dock toggles (inserted before the Dark Mode action)
         self.m_view.insertAction(self.act_dark, self.dock_build.toggleViewAction())
-        self.m_view.insertAction(self.act_dark, self.dock_style.toggleViewAction())
         self.m_view.insertSeparator(self.act_dark)
 
         self._default_state = self.saveState()
@@ -5532,6 +5827,9 @@ class MainWindow(QMainWindow):
         self.controls.ta_fit_requested.connect(self._run_ta_fit)
         self.controls.spin_fw.valueChanged.connect(self._mark_canvas_size_pending)
         self.controls.spin_fh.valueChanged.connect(self._mark_canvas_size_pending)
+        self.controls.spin_fw.valueChanged.connect(self._mark_active_dirty)
+        self.controls.spin_fh.valueChanged.connect(self._mark_active_dirty)
+        self.controls.live_update_requested.connect(self._mark_active_dirty)
         self.controls.chk_snap.toggled.connect(self._update_snap)
         self.controls.spin_snap_step.valueChanged.connect(self._update_snap)
 
@@ -5542,7 +5840,7 @@ class MainWindow(QMainWindow):
         self.figure_tab_bar.figure_rename_requested.connect(self._rename_figure)
 
         self._status_message('Ready — add files to a panel and click Plot.')
-        self._apply_accent(MODES[0]['accent'])
+        self._on_theme_toggle(_APP_DARK)  # syncs the menu action, header button and stylesheet
 
     # ── Figure state properties ───────────────────────────────────────────────
 
@@ -5563,6 +5861,7 @@ class MainWindow(QMainWindow):
         e.request_replot = lambda: self._auto_replot()
         n = len(self._figure_states) + 1
         state = FigureState(canvas=c, editor=e, mode=mode, label=f'Fig {n}')
+        e.changed_callback = lambda state=state: self._mark_dirty(state)
         self._figure_states.append(state)
         self.canvas_stack.addWidget(c)
         self.figure_tab_bar.add_figure(state.label)
@@ -5630,6 +5929,8 @@ class MainWindow(QMainWindow):
     def _close_figure(self, idx: int):
         if len(self._figure_states) <= 1:
             return
+        if not self._confirm_discard(self._figure_states[idx]):
+            return
         state = self._figure_states.pop(idx)
         self.canvas_stack.removeWidget(state.canvas)
         state.canvas.deleteLater()
@@ -5639,18 +5940,133 @@ class MainWindow(QMainWindow):
         self._active_fig_idx = -1
         self._switch_figure(min(idx, len(self._figure_states) - 1))
 
+    def _mark_dirty(self, state):
+        state.dirty = True
+
+    def _mark_active_dirty(self, *_):
+        if self._figure_states:
+            self._figure_states[self._active_fig_idx].dirty = True
+
+    def _confirm_discard(self, state) -> bool:
+        if not state.dirty:
+            return True
+        answer = QMessageBox.warning(
+            self, 'Unsaved figure', f'Save changes to {state.label}?',
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save)
+        if answer == QMessageBox.StandardButton.Cancel:
+            return False
+        if answer == QMessageBox.StandardButton.Save:
+            return self.save_figure_document(state=state)
+        return True
+
+    def save_figure_document(self, path=None, state=None) -> bool:
+        state = state or self._figure_states[self._active_fig_idx]
+        if path is None:
+            path = state.path
+        if not path:
+            path, _ = QFileDialog.getSaveFileName(
+                self, 'Save editable figure', state.label + '.spectra.json',
+                'SpectraPlot figure (*.spectra.json);;JSON (*.json)')
+        if not path:
+            return False
+        try:
+            snapshot = (self.controls.capture_data()
+                        if state is self._figure_states[self._active_fig_idx]
+                        else state.data)
+            doc = spectra_documents.save_figure(
+                path, state.label, state.mode, snapshot or {},
+                state.editor.capture_state(), state.sources)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, 'Could not save figure', str(exc))
+            return False
+        state.data = snapshot
+        state.path = str(path)
+        state.sources = doc['sources']
+        state.dirty = False
+        self._status_message(f'Saved {os.path.basename(path)}')
+        return True
+
+    def _choose_save_document(self):
+        self.save_figure_document()
+
+    def open_figure_document(self, path=None) -> bool:
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(
+                self, 'Open editable figure', '',
+                'SpectraPlot figure (*.spectra.json *.json)')
+        if not path:
+            return False
+        try:
+            doc, issues = spectra_documents.load_figure(path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, 'Could not open figure', str(exc))
+            return False
+
+        idx = self._add_figure_state(doc['mode'])
+        state = self._figure_states[idx]
+        state.label = doc['name']
+        state.data = doc['snapshot']
+        state.path = str(path)
+        state.sources = doc['sources']
+        state.editor.restore_state(doc['editor'])
+        self.figure_tab_bar.set_label(idx, state.label)
+        self._switch_figure(idx)
+        self._do_plot(silent=True)
+        state.dirty = False
+        if issues:
+            changed = ', '.join(os.path.basename(item['path']) for item in issues)
+            QMessageBox.warning(self, 'Source files changed', changed)
+        return True
+
+    def _choose_open_document(self):
+        self.open_figure_document()
+
+    def capture_preset(self, name):
+        return preset_from_snapshot(name, self.controls.capture_data())
+
+    def apply_preset(self, preset):
+        spectra_documents.validate_preset(preset)
+        current = self.controls.capture_data()
+        incoming = preset['settings']
+        current['n_panels'] = incoming.get('n_panels', current['n_panels'])
+        current['n_iv'] = incoming.get('n_iv', current['n_iv'])
+        current['style'].update(incoming.get('style', {}))
+        current['axis'].update(incoming.get('axis', {}))
+        current['titles'].update(incoming.get('titles', {}))
+        self.controls.restore_data(current)
+        self._mark_active_dirty()
+
+    def starter_presets(self):
+        snapshot = self.controls.capture_data()
+        snapshot['n_panels'] = 1
+        return [preset_from_snapshot('Single panel', snapshot)]
+
+    def _save_named_preset(self):
+        name = self._ask_figure_name(self._figure_states[self._active_fig_idx].label)
+        if name:
+            self.preset_library.save(self.capture_preset(name))
+            self._status_message(f'Saved preset {name}')
+
     def _apply_dock_sizes(self):
-        self.resizeDocks([self.dock_build], [s(260)], Qt.Orientation.Horizontal)
-        self.resizeDocks([self.dock_style], [s(360)], Qt.Orientation.Horizontal)
+        self.resizeDocks([self.dock_build], [340], Qt.Orientation.Horizontal)
 
     def _build_chrome(self):
         self.act_plot = QAction("Plot", self)
         self.act_plot.setShortcut("Ctrl+Return")
         self.act_plot.triggered.connect(self._do_plot)
 
+        self.act_open = QAction("Open Figure…", self)
+        self.act_open.setShortcut(QKeySequence.StandardKey.Open)
+        self.act_open.triggered.connect(self._choose_open_document)
+
         self.act_save = QAction("Save Figure…", self)
         self.act_save.setShortcut(QKeySequence.StandardKey.Save)
-        self.act_save.triggered.connect(lambda: self.controls._save("png"))
+        self.act_save.triggered.connect(self._choose_save_document)
+
+        self.act_export = QAction("Export Image…", self)
+        self.act_export.triggered.connect(lambda: self.controls._save("png"))
 
         self.act_undo = QAction("Undo", self)
         self.act_undo.setShortcut(QKeySequence.StandardKey.Undo)
@@ -5694,7 +6110,9 @@ class MainWindow(QMainWindow):
 
         mb = self.menuBar()
         m_file = mb.addMenu("&File")
+        m_file.addAction(self.act_open)
         m_file.addAction(self.act_save)
+        m_file.addAction(self.act_export)
         m_file.addSeparator()
         m_file.addAction(self.act_quit)
         m_edit = mb.addMenu("&Edit")
@@ -5946,35 +6364,6 @@ class MainWindow(QMainWindow):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def _load_bundled_fonts() -> str:
-    """Load the bundled Montserrat variable font and return its family name, or
-    '' if unavailable. The file is renamed to the unique family 'Montserrat App'
-    so Qt always uses our copy instead of (or colliding with) a system install.
-    The single variable file supplies every weight (Light 300 … ExtraBold 800)."""
-    path = resource_path('assets', 'Montserrat-App.ttf')
-    if os.path.isfile(path):
-        fid = QFontDatabase.addApplicationFont(path)
-        fams = QFontDatabase.applicationFontFamilies(fid)
-        if fams:
-            return fams[0]
-    return ''
-
-
-def _load_ui_font() -> str:
-    """Register the bundled Google Sans font (project root) and return its
-    family name, or '' if unavailable."""
-    family = ''
-    for fname in ('GoogleSans-VariableFont_GRAD,opsz,wght.ttf',
-                  'GoogleSans-Italic-VariableFont_GRAD,opsz,wght.ttf'):
-        path = resource_path(fname)
-        if os.path.isfile(path):
-            fid = QFontDatabase.addApplicationFont(path)
-            fams = QFontDatabase.applicationFontFamilies(fid)
-            if fams and not family:
-                family = fams[0]
-    return family
-
-
 def main():
     if sys.platform == 'darwin':
         os.environ.setdefault('QT_MAC_WANTS_LAYER', '1')
@@ -5983,29 +6372,15 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     init_ui_scale(app)
-    mont_font = _load_bundled_fonts()
-    ui_font = _load_ui_font()
-    chosen_font = mont_font or ui_font   # Montserrat is the primary UI font
-    if chosen_font:
-        set_ui_font(chosen_font)
-    app.setStyleSheet(build_style(MODES[0]['accent'], False, spectra_theme.UI_SCALE))
-    app.setFont(QFont(chosen_font or 'Segoe UI', s(11)))
-    splash = create_loading_screen()
-    splash.show()
-    app.processEvents()
-    _t0 = time.monotonic()
+    ui_font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
+    if sys.platform == 'win32':
+        ui_font.setFamily('Segoe UI')
+        ui_font.setPointSize(10)
+    app.setFont(ui_font)
+    set_ui_font(ui_font.family())
+    app.setStyleSheet(build_style(MODES[0]['accent'], _APP_DARK, spectra_theme.UI_SCALE))
     win = MainWindow()
-    # Keep the loading screen up for a fixed 10 s total (minus build time)
-    _elapsed_ms = int((time.monotonic() - _t0) * 1000)
-    _remaining = max(0, 10000 - _elapsed_ms)
-
-    def _reveal():
-        if hasattr(splash, '_quip_timer'):
-            splash._quip_timer.stop()
-        win.showMaximized()
-        splash.finish(win)
-
-    QTimer.singleShot(_remaining, _reveal)
+    win.show()
     sys.exit(app.exec())
 
 
