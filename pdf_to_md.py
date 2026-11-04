@@ -98,7 +98,7 @@ def collect_sizes(doc) -> tuple[float, list[float]]:
     return body_size, heading_sizes
 
 
-def pdf_to_markdown(pdf_path: Path, output_path: Path) -> None:
+def pdf_to_markdown_text(pdf_path: Path) -> str:
     import fitz  # PyMuPDF
 
     doc = fitz.open(pdf_path)
@@ -118,31 +118,58 @@ def pdf_to_markdown(pdf_path: Path, output_path: Path) -> None:
     doc.close()
     print()
 
-    output_path.write_text("\n\n---\n\n".join(chunks), encoding="utf-8")
+    return "\n\n---\n\n".join(chunks)
+
+
+def pdf_to_markdown(pdf_path: Path, output_path: Path) -> None:
+    output_path.write_text(pdf_to_markdown_text(pdf_path), encoding="utf-8")
     print(f"Written to '{output_path}'")
 
 
+def folder_to_markdown(folder: Path, output_path: Path) -> None:
+    pdfs = sorted(folder.glob("*.pdf"))
+    if not pdfs:
+        sys.exit(f"Error: no .pdf files found in '{folder}'.")
+
+    sections = []
+    for pdf_path in pdfs:
+        text = pdf_to_markdown_text(pdf_path)
+        sections.append(f"# {pdf_path.stem}\n\n{text}")
+
+    output_path.write_text("\n\n---\n\n".join(sections), encoding="utf-8")
+    print(f"Merged {len(pdfs)} PDFs into '{output_path}'")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Convert a PDF to Markdown.")
-    parser.add_argument("pdf", help="Input PDF file")
+    parser = argparse.ArgumentParser(
+        description="Convert a PDF (or a folder of PDFs) to Markdown."
+    )
+    parser.add_argument("path", help="Input PDF file, or a folder of PDFs to merge")
     parser.add_argument(
         "-o", "--output",
-        help="Output .md file (default: same name as PDF with .md extension)",
+        help="Output .md file (default: <name>.md next to the PDF, "
+             "or <folder>/merged.md for a folder)",
     )
     args = parser.parse_args()
 
-    pdf_path = Path(args.pdf).expanduser().resolve()
-    if not pdf_path.exists():
-        sys.exit(f"Error: '{pdf_path}' not found.")
-    if pdf_path.suffix.lower() != ".pdf":
-        sys.exit("Error: input file must be a .pdf.")
+    in_path = Path(args.path).expanduser().resolve()
+    if not in_path.exists():
+        sys.exit(f"Error: '{in_path}' not found.")
 
-    output_path = (
-        Path(args.output).expanduser().resolve() if args.output
-        else pdf_path.with_suffix(".md")
-    )
-
-    pdf_to_markdown(pdf_path, output_path)
+    if in_path.is_dir():
+        output_path = (
+            Path(args.output).expanduser().resolve() if args.output
+            else in_path / "merged.md"
+        )
+        folder_to_markdown(in_path, output_path)
+    else:
+        if in_path.suffix.lower() != ".pdf":
+            sys.exit("Error: input file must be a .pdf.")
+        output_path = (
+            Path(args.output).expanduser().resolve() if args.output
+            else in_path.with_suffix(".md")
+        )
+        pdf_to_markdown(in_path, output_path)
 
 
 if __name__ == "__main__":
