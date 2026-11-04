@@ -112,6 +112,20 @@ class SpectraPlottingBehaviorTest(unittest.TestCase):
 
         self.assertEqual([ax.get_xlim() for ax in fig.axes], [(20.0, 10.0), (40.0, 30.0)])
 
+    def test_xrd_vlines_drawn_on_every_panel_with_optional_color(self):
+        self.assertEqual(
+            spectra_app.parse_xrd_vlines("5.3, junk, 10.6 red"),
+            [(5.3, "#888888"), (10.6, "red")],
+        )
+        fig = Figure()
+
+        spectra_app.do_plot(fig, base_settings(plot_type="xrd", xrd_vlines="5.3, 10.6 red"))
+
+        for ax in fig.axes:
+            self.assertEqual([ln.get_xdata()[0] for ln in ax.lines], [5.3, 10.6])
+            self.assertEqual(ax.lines[1].get_color(), "red")
+            self.assertFalse(ax.get_legend())
+
     def test_tick_label_padding_is_applied(self):
         fig = Figure()
 

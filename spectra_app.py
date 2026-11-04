@@ -327,6 +327,21 @@ def normalize_xrd_intensity(y):
     return y / ymax
 
 
+def parse_xrd_vlines(text: str) -> list:
+    """'5.3, 10.6 red, 14.9 #000' -> [(5.3,'#888888'), (10.6,'red'), (14.9,'#000')].
+    Bad tokens are skipped."""
+    out = []
+    for tok in text.split(','):
+        parts = tok.split()
+        if not parts:
+            continue
+        try:
+            out.append((float(parts[0]), parts[1] if len(parts) > 1 else '#888888'))
+        except ValueError:
+            continue
+    return out
+
+
 def panel_x_window(s: dict, idx: int):
     """The X range panel `idx` will be drawn over, exactly as configured, or None
     when the panel auto-fits to its data. The pair is returned in the order the
@@ -2144,6 +2159,16 @@ class ControlPanel(QWidget):
         xgl.addWidget(_log_hint)
 
         xgl.addWidget(_sep())
+        # Dotted vertical guides at fixed 2θ positions to mark peaks across
+        # the stack. Token = "<2θ> [color]", comma-separated.
+        self.edit_xrd_vlines = QLineEdit()
+        self.edit_xrd_vlines.setPlaceholderText('5.3, 10.6 red, 14.9 black')
+        xgl.addLayout(_labeled('Peak lines', self.edit_xrd_vlines))
+        _vl_hint = QLabel('Comma-separated 2θ values, each with an optional\ncolor (name or #hex). Drawn as dotted lines.')
+        _vl_hint.setObjectName('fieldlbl')
+        xgl.addWidget(_vl_hint)
+
+        xgl.addWidget(_sep())
         self.chk_xrd_margin_labels = QCheckBox('Right margin trace labels')
         self.chk_xrd_margin_labels.setChecked(False)
         xgl.addWidget(self.chk_xrd_margin_labels)
@@ -2899,6 +2924,7 @@ class ControlPanel(QWidget):
         self.xrd_ref_scales.clear()
         self.xrd_ref_offsets.clear()
         self.xrd_ref_list.clear()
+        self.edit_xrd_vlines.clear()
 
     def capture_data(self) -> dict:
         """Snapshot a figure's full state — data AND style — so reselecting its
@@ -2922,6 +2948,7 @@ class ControlPanel(QWidget):
             'xrd_ref_styles': list(self.xrd_ref_styles),
             'xrd_ref_scales': list(self.xrd_ref_scales),
             'xrd_ref_offsets': list(self.xrd_ref_offsets),
+            'xrd_vlines': self.edit_xrd_vlines.text(),
             # ── Style (Plot Style dock + graph appearance) ──
             'style': self._style_preset(),
             # ── Axes (Build panel) ──
@@ -3015,6 +3042,7 @@ class ControlPanel(QWidget):
         while len(self.xrd_ref_offsets) < len(self.xrd_ref_paths):
             self.xrd_ref_offsets.append(0.0)
         self.refresh_xrd_ref_list()
+        _txt(self.edit_xrd_vlines, snap.get('xrd_vlines', ''))
 
         # ── Style ──
         self._apply_style_preset(snap.get('style', {}))
@@ -3159,6 +3187,7 @@ class ControlPanel(QWidget):
             'xrd_log_exp': self.chk_xrd_log.isChecked(),
             'xrd_margin_labels': self.chk_xrd_margin_labels.isChecked(),
             'xrd_margin_label_gap': self.spin_xrd_label_gap.value(),
+            'xrd_vlines': self.edit_xrd_vlines.text(),
             'xrd_ref_paths': list(self.xrd_ref_paths),
             'xrd_ref_colors': list(self.xrd_ref_colors),
             'xrd_ref_labels': list(self.xrd_ref_labels),
@@ -5108,6 +5137,14 @@ def _plot_xrd(axes: list, s: dict) -> int:
                           color=color, linestyle=lstyle, label=tr['display_name'])
             ln._spectra_src = ('trace', tr.get('uid'))
             hs.append(ln); ls.append(tr['display_name']); srcs.append(('trace', tr.get('uid')))
+
+        # Peak guide lines. axvline's auto label starts with '_' so the legend
+        # and margin labels skip it; zorder keeps it behind the traces.
+        for xv, col in parse_xrd_vlines(s.get('xrd_vlines', '')):
+            if use_d:
+                xv = float(two_theta_to_d(xv, lam))
+            ax.axvline(xv, color=col, linestyle=':',
+                       linewidth=0.8 * s['linewidth'], zorder=0.5)
 
         xlabel = 'd-spacing (Å)' if use_d else '2θ (°)'
         ylabel = 'log_{10}(Intensity)' if do_log else 'Intensity'
