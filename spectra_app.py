@@ -446,6 +446,60 @@ def savgol_smooth(y, window_length: int, polyorder: int = 3):
     return np.convolve(y_padded, coeffs[::-1], mode='valid')
 
 
+# op -> (display symbol, ufunc)
+TRACE_MATH_OPS = {
+    '+': ('+', np.add),
+    '-': ('−', np.subtract),
+    '*': ('×', np.multiply),
+    '/': ('÷', np.divide),
+}
+
+
+def apply_trace_math(x, y, math: dict):
+    """Apply a trace's `math` record to y, returning the new y (None if the
+    operand file can't be read). A trace operand is interpolated onto x; points
+    outside its range and divisions by zero become NaN, so the line breaks
+    there instead of extrapolating or shooting to infinity."""
+    y = np.asarray(y, dtype=float)
+    if math.get('operand_path'):
+        bx, by = load_file(math['operand_path'])
+        if bx is None:
+            return None
+        order = np.argsort(bx)
+        operand = np.interp(x, bx[order], by[order], left=np.nan, right=np.nan)
+    else:
+        operand = float(math['value'])
+    with np.errstate(divide='ignore', invalid='ignore'):
+        result = TRACE_MATH_OPS[math['op']][1](y, operand)
+    return np.where(np.isfinite(result), result, np.nan)
+
+
+def trace_math_source(trace: dict) -> str:
+    """Filename of a trace, or 'a.csv − b.csv' / 'a.csv × 2' for a math result."""
+    name = os.path.basename(trace.get('path', ''))
+    math = trace.get('math')
+    if not math:
+        return name
+    right = (os.path.basename(math['operand_path']) if math.get('operand_path')
+             else f"{math['value']:g}")
+    return f"{name} {TRACE_MATH_OPS[math['op']][0]} {right}"
+
+
+EXPORT_FORMATS = ('png', 'pdf', 'svg')
+
+
+def resolve_export_target(path: str, selected_filter: str) -> tuple[str, str]:
+    """Pick (path, format) for an export: a typed extension wins, otherwise use
+    the format of the selected file filter and append its extension."""
+    ext = os.path.splitext(path)[1].lstrip('.').lower()
+    if ext in EXPORT_FORMATS:
+        return path, ext
+    fmt = selected_filter.split(' ')[0].lower()
+    if fmt not in EXPORT_FORMATS:
+        fmt = EXPORT_FORMATS[0]
+    return f'{path}.{fmt}', fmt
+
+
 # ── Spin boxes without arrows and without wheel-scroll ───────────────────────
 
 class FlatSpinBox(QSpinBox):
@@ -757,7 +811,7 @@ class TraceEditDialog(QDialog):
 
         # Read-only original filename so the source is visible behind a rename.
         path = trace.get('path', '')
-        lbl_file = QLabel(os.path.basename(path) or '—')
+        lbl_file = QLabel(trace_math_source(trace) or '—')
         lbl_file.setObjectName('hint')
         lbl_file.setWordWrap(True)
         lbl_file.setToolTip(path)
@@ -816,6 +870,94 @@ class TraceEditDialog(QDialog):
         self.trace['visible'] = self.chk_visible.isChecked()
         self.trace['linewidth'] = self.spin_lw.value() if self.chk_lw.isChecked() else None
         self.trace['linestyle'] = self.combo_ls.currentText()
+
+
+class TraceMathDialog(QDialog):
+    """Build a new trace from arithmetic on a loaded trace, with a number or
+    another trace from the same panel. The source traces are left untouched."""
+
+    def __init__(self, traces: list, row: int = 0, parent=None):
+        super().__init__(parent)
+        self.traces = traces
+        self._name_edited = False
+        self.setWindowTitle('Trace Math')
+        self.setMinimumWidth(s(380))
+
+        form = QFormLayout(self)
+        form.setSpacing(s(10))
+
+        self.combo_a = NoScrollComboBox()
+        self.combo_a.addItems([t['display_name'] for t in traces])
+        self.combo_a.setCurrentIndex(row)
+        form.addRow('Trace', self.combo_a)
+
+        self.combo_op = NoScrollComboBox()
+        for op, (sym, _) in TRACE_MATH_OPS.items():
+            self.combo_op.addItem(sym, op)
+        form.addRow('Operation', self.combo_op)
+
+        self.combo_b = NoScrollComboBox()
+        self.combo_b.addItem('Number')
+        self.combo_b.addItems([t['display_name'] for t in traces])
+        form.addRow('With', self.combo_b)
+
+        self.spin_value = FlatDoubleSpinBox()
+        self.spin_value.setRange(-1e12, 1e12)
+        self.spin_value.setDecimals(6)
+        self.spin_value.setValue(1.0)
+        form.addRow('Number', self.spin_value)
+
+        self.edit_name = QLineEdit()
+        self.edit_name.textEdited.connect(self._mark_name_edited)
+        form.addRow('Result name', self.edit_name)
+
+        hint = QLabel('Adds a new trace; the originals are not changed. Traces on\n'
+                      'different X values are interpolated over their overlap.')
+        hint.setObjectName('hint')
+        form.addRow('', hint)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        form.addRow(self.buttons)
+
+        for combo in (self.combo_a, self.combo_op, self.combo_b):
+            combo.currentIndexChanged.connect(self._sync)
+        self.spin_value.valueChanged.connect(self._sync)
+        self._sync()
+
+    def _mark_name_edited(self):
+        self._name_edited = True
+
+    def _operand_trace(self):
+        i = self.combo_b.currentIndex()
+        return self.traces[i - 1] if i > 0 else None
+
+    def _sync(self):
+        operand = self._operand_trace()
+        self.spin_value.setEnabled(operand is None)
+        right = operand['display_name'] if operand else f'{self.spin_value.value():g}'
+        if not self._name_edited:
+            self.edit_name.setText(f"{self.combo_a.currentText()} "
+                                   f"{self.combo_op.currentText()} {right}")
+        # Dividing by a constant zero would only ever produce an empty trace.
+        divides_by_zero = (operand is None and self.combo_op.currentData() == '/'
+                           and self.spin_value.value() == 0)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(not divides_by_zero)
+
+    def result_trace(self) -> dict:
+        source = self.traces[self.combo_a.currentIndex()]
+        operand = self._operand_trace()
+        math = {'op': self.combo_op.currentData()}
+        if operand:
+            math['operand_path'] = operand['path']
+        else:
+            math['value'] = self.spin_value.value()
+        tr = make_trace(source['path'])
+        tr['display_name'] = self.edit_name.text().strip() or tr['display_name']
+        tr['math'] = math
+        return tr
 
 
 class ReferenceEditDialog(QDialog):
@@ -1042,7 +1184,15 @@ class PanelFileWidget(QWidget):
         self.btn_edit = QPushButton('Edit Trace…')
         self.btn_edit.setObjectName('secondary')
         self.btn_edit.clicked.connect(self._edit_selected)
-        lay.addWidget(self.btn_edit)
+        self.btn_math = QPushButton('Math…')
+        self.btn_math.setObjectName('secondary')
+        self.btn_math.setToolTip('Add a trace computed from a trace and a number or another trace')
+        self.btn_math.clicked.connect(self._open_math)
+        edit_row = QHBoxLayout()
+        edit_row.setSpacing(s(6))
+        edit_row.addWidget(self.btn_edit, 2)
+        edit_row.addWidget(self.btn_math, 1)
+        lay.addLayout(edit_row)
 
         # Gradient toggle — when off, each trace uses its own assigned color
         self.chk_gradient = QCheckBox('Use gradient colors')
@@ -1086,7 +1236,8 @@ class PanelFileWidget(QWidget):
             self, f'Select files for Panel {self.index + 1}',
             '', 'Spectroscopy files (*.csv *.tsv *.xy);;All files (*.*)'
         )
-        existing = {t['path'] for t in self.traces}
+        # Math results share their source's path, so they don't count as that file.
+        existing = {t['path'] for t in self.traces if 'math' not in t}
         added = False
         for p in paths:
             if p not in existing:
@@ -1166,6 +1317,25 @@ class PanelFileWidget(QWidget):
             dlg.apply()
             self._refresh_item(row)
             self.changed.emit()
+
+    def _open_math(self):
+        # Results aren't offered as inputs: operands are files, not list rows.
+        sources = [t for t in self.traces if 'math' not in t]
+        if not sources:
+            QMessageBox.information(self, 'Trace Math', 'Add a file to this panel first.')
+            return
+        row = self.lst.currentRow()
+        current = self.traces[row] if 0 <= row < len(self.traces) else None
+        start = sources.index(current) if current in sources else 0
+        dlg = TraceMathDialog(sources, start, self)
+        if dlg.exec():
+            self.add_math_trace(dlg.result_trace())
+
+    def add_math_trace(self, trace: dict):
+        self.traces.append(trace)
+        self._rebuild_list()
+        self.lst.setCurrentRow(len(self.traces) - 1)
+        self.changed.emit()
 
     def file_entries(self) -> list:
         # Return copies so plotting never mutates the live trace records.
@@ -2888,14 +3058,19 @@ class ControlPanel(QWidget):
         for lbl in self.xrd_ref_labels:
             self.xrd_ref_list.addItem(lbl)
 
-    def _save(self, fmt: str):
+    def _save(self, fmt: str = None):
+        """Export the figure as fmt, or let the save dialog choose the format."""
         if self._canvas is None:
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, f'Save as {fmt.upper()}', '',
-            f'{fmt.upper()} files (*.{fmt});;All files (*.*)'
-        )
+        if fmt:
+            title, filters = f'Save as {fmt.upper()}', f'{fmt.upper()} files (*.{fmt});;All files (*.*)'
+        else:
+            title = 'Export Figure'
+            filters = ';;'.join(f'{f.upper()} files (*.{f})' for f in EXPORT_FORMATS)
+        path, selected = QFileDialog.getSaveFileName(self, title, '', filters)
         if path:
+            if not fmt:
+                path, fmt = resolve_export_target(path, selected)
             if self.before_save:
                 self.before_save()   # strip on-canvas selection highlight before export
             try:
@@ -4864,6 +5039,10 @@ def _load_traces(panel: dict, smooth_window: int = 0) -> tuple[list, int]:
         if not tr.get('visible', True):
             continue
         x, y = load_file(tr['path'])
+        if x is not None and tr.get('math'):
+            y = apply_trace_math(x, y, tr['math'])
+            if y is None:
+                x = None
         if x is not None:
             if smooth_window >= 3:
                 y = savgol_smooth(y, smooth_window)
@@ -4891,9 +5070,14 @@ def _trace_visual(tr: dict, grad_colors, k: int, use_gradient: bool,
 
 def _pl_trace_y(y, baseline_correct: bool):
     """Apply the PL baseline correction used by the original MATLAB scripts."""
-    if baseline_correct and len(y):
-        return y - np.min(y)
+    if baseline_correct and np.any(np.isfinite(y)):
+        return y - np.nanmin(y)
     return y
+
+
+def _trace_peak(y) -> float:
+    """Highest finite value of y (math results can contain NaN gaps), or 0."""
+    return float(np.nanmax(y)) if np.any(np.isfinite(y)) else 0.0
 
 
 def _right_edge_y(line, x_probe: float):
@@ -4976,7 +5160,7 @@ def _plot_pl(axes: list, s: dict) -> int:
             yc = _pl_trace_y(y, baseline_correct)
             # Ordering (plot z-order, gradient, legend) uses the true intensity,
             # captured before normalizing — otherwise every peak becomes 1.0.
-            peak = float(np.max(yc)) if len(yc) else 0.0
+            peak = _trace_peak(yc)
             if normalize:
                 yc = normalize_in_window(x, yc, window)
             corrected.append((x, yc, peak, tr, add_idx))
@@ -5028,7 +5212,7 @@ def _plot_absorbance(axes: list, s: dict) -> int:
         window = panel_x_window(s, i)
         # The peak is read before normalizing so plot order stays true-intensity.
         with_pk = [(x, normalize_in_window(x, y, window) if normalize else y,
-                    float(np.max(y)) if len(y) else 0.0, tr)
+                    _trace_peak(y), tr)
                    for x, y, tr in traces]
         with_pk.sort(key=lambda t: t[2], reverse=True)
 
@@ -5780,7 +5964,7 @@ def create_loading_screen() -> QSplashScreen:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('SPECTRAplot Experimental')
+        self.setWindowTitle('SPECTRAplot')
         self.resize(1280, 820)
         self.setMinimumSize(940, 600)
         self.storage_dir = os.environ.get(
@@ -5810,7 +5994,7 @@ class MainWindow(QMainWindow):
         self.header.plot_requested.connect(self._do_plot)
         self.header.open_requested.connect(self._choose_open_document)
         self.header.save_requested.connect(self._choose_save_document)
-        self.header.export_requested.connect(lambda: self.controls._save('png'))
+        self.header.export_requested.connect(lambda: self.controls._save())
         self.header.presets_requested.connect(self._save_named_preset)
         # The header spans the full window width above the docks (a top toolbar
         # sits above the left/right dock areas while keeping the menu bar).
@@ -6102,8 +6286,8 @@ class MainWindow(QMainWindow):
         self.act_save.setShortcut(QKeySequence.StandardKey.Save)
         self.act_save.triggered.connect(self._choose_save_document)
 
-        self.act_export = QAction("Export Image…", self)
-        self.act_export.triggered.connect(lambda: self.controls._save("png"))
+        self.act_export = QAction("Export…", self)
+        self.act_export.triggered.connect(lambda: self.controls._save())
 
         self.act_undo = QAction("Undo", self)
         self.act_undo.setShortcut(QKeySequence.StandardKey.Undo)

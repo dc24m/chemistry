@@ -101,7 +101,7 @@ class SpectraStaticRegressionTest(unittest.TestCase):
     def test_pl_baseline_correction_uses_lowest_point(self):
         source = _function_source("_pl_trace_y")
 
-        self.assertIn("np.min(y)", source)
+        self.assertIn("np.nanmin(y)", source)
         self.assertNotIn("y[0]", source)
 
     def test_iv_curve_mode_has_dedicated_dataset_ui(self):

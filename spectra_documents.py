@@ -11,7 +11,7 @@ VERSION = 1
 FIGURE_FORMAT = 'spectraplot.figure'
 PRESET_FORMAT = 'spectraplot.preset'
 MODES = {'pl', 'absorbance', 'xrd', 'iv', 'ta'}
-PATH_KEYS = {'path', 'neg_path', 'pos_path', 'uvvis_path'}
+PATH_KEYS = {'path', 'neg_path', 'pos_path', 'uvvis_path', 'operand_path'}
 
 
 def json_value(value):
